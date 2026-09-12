@@ -173,7 +173,7 @@ pub enum ServerToClient {
     /// blobs (peers first, coordinator as fallback) and reads the
     /// manifest for execution parameters.
     JobAssignment {
-        descriptor: content_descriptor::JobDescriptor,
+        descriptor: contentstore::JobDescriptor,
         /// Connected peers that may already hold the blobs — the
         /// p2p fetch path ahead of the coordinator fallback.
         peer_hints: Vec<String>,

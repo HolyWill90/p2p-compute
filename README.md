@@ -1,13 +1,23 @@
 # p2p-compute
 
+[![CI](https://github.com/HolyWill90/p2p-compute/actions/workflows/ci.yml/badge.svg)](https://github.com/HolyWill90/p2p-compute/actions/workflows/ci.yml)
+
 Deterministic verification substrate for peer-to-peer compute — the
 "BitTorrent of processing" foundation: jobs run on untrusted machines, and
 the results are verifiable.
 
 The core artifact is a **pinned deterministic RISC-V (RV64IMC) emulator** that
 emits a hash of the machine state after every fixed chunk of instructions.
-Every verification mechanism (quorum, dispute games, zk proofs) consumes that
-chunk-hash chain. See `docs/DESIGN.md` for the decision log.
+Every verification mechanism consumes that chunk-hash chain:
+
+| Tier | Mechanism | Overhead | Status |
+|---|---|---|---|
+| Budget | Quorum N=3 → 5, bond slashing | ~3× | implemented |
+| Standard | Optimistic acceptance + dispute game (one-chunk judge) | ~1× | implemented |
+| Strong | SP1 zkVM proof — same ELF, same ISA | 1× + prover tax | verified (three-way: emulator == zkVM == host) |
+
+See `docs/DESIGN.md` for the decision log and `docs/PILOT.md` for the
+product direction.
 
 ## Layout
 
@@ -15,8 +25,10 @@ chunk-hash chain. See `docs/DESIGN.md` for the decision log.
 crates/abi         job ABI: memory map, halt convention, pinned ISA string
 crates/rvcore      the emulator: RV64IMC interpreter + chunk-hash chain (BLAKE3)
 crates/jobfmt      job manifest/result formats
-crates/worker      runs a job, emits result + chunk hash chain (a "peer")
-crates/coordinator quorum logic + demo driver (runs as the job client)
+crates/worker      worker daemon + local runner (a "peer")
+crates/coordinator quorum/dispute/ledger logic + network server (the job client)
+crates/wire        transport: length-prefixed JSON frames, TLS support, peer protocol
+crates/contentstore BLAKE3-addressed blob store (the torrent layer, seeded)
 crates/difftest    differential determinism harness
 crates/conformance ISA conformance differential driver (emulator vs QEMU)
 jobs/demo-hash     the demo job: no_std Rust, compiled to a RISC-V ELF
@@ -40,7 +52,7 @@ cd jobs/demo-hash/job && cargo build --release && cd ../../..
 cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash/program.elf
 
 # 4. run one worker on the demo job (2 MiB input, ~33.5M instructions)
-cargo run --release -p worker -- jobs/demo-hash --id solo
+cargo run --release -p worker -- run jobs/demo-hash --id solo
 
 # 5. differential determinism: debug vs release must hash identically
 cargo run --release -p difftest -- jobs/demo-hash
@@ -55,26 +67,31 @@ cargo run --release -p coordinator -- run jobs/demo-hash --worker target/release
 scripts/qemu-conformance.sh
 
 # 9. dispute game: honest claim vs corrupt counter-result
-target/release/worker.exe jobs/demo-hash --id w1 --out target/a.json --snapshots target/snaps-w1
-target/release/worker.exe jobs/demo-hash --id w2 --out target/b.json --corrupt
+target/release/worker.exe run jobs/demo-hash --id w1 --out target/a.json --snapshots target/snaps-w1
+target/release/worker.exe run jobs/demo-hash --id w2 --out target/b.json --corrupt
 target/release/coordinator.exe dispute jobs/demo-hash --a target/a.json --b target/b.json --snapshots target/snaps-w1
 
 # 10. optimistic acceptance (add --challenge to dispute inside the window)
 target/release/coordinator.exe optimistic jobs/demo-hash --worker target/release/worker.exe --window-ms 50
 
 # 11. agent-task pilot: deterministic agent-shaped batch work with an audit chain
-cargo run --release -p worker -- jobs/agent-task --id agent
+cargo run --release -p worker -- run jobs/agent-task --id agent
 
 # 12. content-addressed store: publish a job, reconstruct it anywhere from hashes
 target/release/coordinator.exe publish jobs/demo-hash --store target/store --out target/demo.desc.json
 target/release/coordinator.exe fetch --desc target/demo.desc.json --store target/store --out target/materialized
-target/release/worker.exe target/materialized --id from-store   # identical result hash
+target/release/worker.exe run target/materialized --id from-store   # identical result hash
 target/release/coordinator.exe verify --store target/store
 
 # 13. zk tier (needs the SP1 toolchain, ~2 GB one-time download)
 scripts/sp1-validate.sh
 
-# 14. persistent multi-job session with peer-to-peer blob exchange:
+# 14. TLS: serve --tls generates a self-signed coordinator cert on first run;
+#     workers pin its fingerprint (--server-cert) — no other server is accepted
+target/release/coordinator.exe serve --jobs-dir target/jobs --store target/store --tls --max-jobs 1
+target/release/worker.exe daemon --server 127.0.0.1:7777 --id wA --identity wA.key     --server-cert target/store/coordinator-cert.der --listen-port 7780
+
+# 15. persistent multi-job session with peer-to-peer blob exchange:
 #     terminal A:  coordinator serve --jobs-dir target/jobs --store target/store --pool 2 --max-jobs 3
 #     terminal B:  worker daemon --server 127.0.0.1:7777 --id wA --identity wA.key --listen-port 7780
 #     then drop descriptor files (from `coordinator publish --out`) into target/jobs;
@@ -82,8 +99,9 @@ scripts/sp1-validate.sh
 ```
 
 On CI (`.github/workflows/ci.yml`), the differential test runs on
-Windows/Linux/macOS (x64 + ARM64) and a final job asserts all three
-platforms produced byte-identical chunk hash chains.
+Windows/Linux/macOS (x64 + ARM64), a QEMU job cross-checks the emulator
+against an independent RISC-V implementation, and a final job asserts all
+three platforms produced byte-identical chunk hash chains.
 
 ## The determinism contract
 

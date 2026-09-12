@@ -380,7 +380,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                         "blob request: {} asks {} -> {}",
                         wid,
                         &id[..12.min(id.len())],
-                        if data.is_some() { "FOUND" } else { "NOT FOUND" }
+                        if data.is_some() { "served" } else { "not found" }
                     );
                     let _ = c.outbound.send(ServerToClient::Blob {
                         hex: data.map(|d| hex(&d)),
