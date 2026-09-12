@@ -38,11 +38,15 @@ jobs:
       - name: Differential determinism (debug vs release on this OS)
         run: cargo run --release -p difftest -- jobs/demo-hash
 
+      - name: Stage result hash with a per-OS filename
+        shell: bash
+        run: cp target/difftest-release.json "difftest-release-${{ matrix.os }}.json"
+
       - name: Upload result hashes for cross-platform comparison
         uses: actions/upload-artifact@v4
         with:
           name: hashes-${{ matrix.os }}
-          path: target/difftest-release.json
+          path: difftest-release-${{ matrix.os }}.json
 
   conformance:
     # Independent-implementation differential: the same static RISC-V
