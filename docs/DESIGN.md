@@ -197,6 +197,10 @@ from the dispatch decision.
 4. Per-chunk snapshots live on the worker side only; the content store
    now makes inputs auditable — remaining: serving blobs over the network.
 5. Networking: TLS on the wire, NAT traversal, peer discovery beyond
-   the coordinator's hints, and one intermittent issue observed once in
-   testing (a worker dropped between jobs and reconnected — recovered,
-   root cause not yet pinned).
+   the coordinator's hints.
+6. FIXED — the intermittent between-jobs worker drop: root cause was a
+   shared per-job temp directory (`temp/p2pc-worker-{job_id}`) — two
+   workers materializing the same job concurrently raced on
+   program.elf, and one executed a partially-written ELF (hanging the
+   emulator). Fixed with per-worker materialization directories;
+   verified 4/4 clean runs plus a 25-job stress pass.

@@ -59,6 +59,9 @@ fn load_or_create_identity(path: &Path) -> SigningKey {
     let mut seed = [0u8; 32];
     use rand_core::RngCore;
     rand_core::OsRng.fill_bytes(&mut seed);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create identity dir");
+    }
     std::fs::write(path, &seed).expect("write identity file");
     SigningKey::from_bytes(&seed)
 }
@@ -168,9 +171,63 @@ fn fetch_blob(
     }
 }
 
-/// Run the daemon until the server shuts the session down.
+/// How a single session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEnd {
+    /// The coordinator said goodbye — stop reconnecting.
+    ServerShutdown,
+    /// The connection dropped unexpectedly — reconnect.
+    ConnectionLost,
+}
+
+/// Run the daemon across reconnects: a dropped connection is retried
+/// with capped exponential backoff (a worker should be a durable
+/// presence, not a fair-weather peer). Stats accumulate across
+/// sessions; the loop ends only on a coordinator-initiated shutdown.
 pub fn run_daemon(cfg: &DaemonConfig) -> Result<DaemonStats, String> {
     let counters = Arc::new(Counters::default());
+    let mut backoff = std::time::Duration::from_secs(1);
+    loop {
+        eprintln!("[{}] session: connecting attempt", cfg.worker_id);
+        let (end, stats) = session_once(cfg, &counters)?;
+        eprintln!(
+            "[{}] session ended: {:?} (jobs so far: {})",
+            cfg.worker_id,
+            end,
+            stats.jobs_done
+        );
+        match end {
+            SessionEnd::ServerShutdown => return Ok(stats),
+            SessionEnd::ConnectionLost => {
+                println!(
+                    "[{}] connection lost — reconnecting in {:?}",
+                    cfg.worker_id, backoff
+                );
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(10));
+                // Successful sessions reset the backoff.
+                if counters.jobs.load(Ordering::SeqCst) > 0 {
+                    backoff = std::time::Duration::from_secs(1);
+                }
+            }
+        }
+    }
+}
+
+fn stats_snapshot(counters: &Counters) -> DaemonStats {
+    DaemonStats {
+        jobs_done: counters.jobs.load(Ordering::SeqCst),
+        blobs_from_peers: counters.from_peers.load(Ordering::SeqCst),
+        blobs_from_server: counters.from_server.load(Ordering::SeqCst),
+        blobs_served_to_peers: counters.served.load(Ordering::SeqCst),
+    }
+}
+
+/// One connection's worth of session.
+fn session_once(
+    cfg: &DaemonConfig,
+    counters: &Arc<Counters>,
+) -> Result<(SessionEnd, DaemonStats), String> {
 
     // Optional peer blob server: bound before Hello so the real port
     // can be reported to the coordinator.
@@ -189,7 +246,11 @@ pub fn run_daemon(cfg: &DaemonConfig) -> Result<DaemonStats, String> {
         None => None,
     };
 
-    let stream = TcpStream::connect(&cfg.server).map_err(|e| format!("connect: {e}"))?;
+    let stream = TcpStream::connect_timeout(
+        &cfg.server.parse().map_err(|e| format!("server addr: {e}"))?,
+        std::time::Duration::from_secs(30),
+    )
+    .map_err(|e| format!("connect: {e}"))?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(3600)))
         .ok();
@@ -233,12 +294,10 @@ pub fn run_daemon(cfg: &DaemonConfig) -> Result<DaemonStats, String> {
             // The server closed right after taking our result — the
             // decision was reached without a formal goodbye.
             println!("[{}] session over: decision reached", cfg.worker_id);
-            return Ok(DaemonStats {
-                jobs_done: counters.jobs.load(Ordering::SeqCst),
-                blobs_from_peers: counters.from_peers.load(Ordering::SeqCst),
-                blobs_from_server: counters.from_server.load(Ordering::SeqCst),
-                blobs_served_to_peers: counters.served.load(Ordering::SeqCst),
-            });
+            return Ok((
+                SessionEnd::ServerShutdown,
+                stats_snapshot(counters),
+            ));
         }
         let message = received.map_err(|e| e.to_string())?;
         match message {
@@ -250,12 +309,10 @@ pub fn run_daemon(cfg: &DaemonConfig) -> Result<DaemonStats, String> {
             }
             ServerToClient::ShutDown { reason } => {
                 println!("[{}] session over: {reason}", cfg.worker_id);
-                return Ok(DaemonStats {
-                    jobs_done: counters.jobs.load(Ordering::SeqCst),
-                    blobs_from_peers: counters.from_peers.load(Ordering::SeqCst),
-                    blobs_from_server: counters.from_server.load(Ordering::SeqCst),
-                    blobs_served_to_peers: counters.served.load(Ordering::SeqCst),
-                });
+                return Ok((
+                    SessionEnd::ServerShutdown,
+                    stats_snapshot(counters),
+                ));
             }
             ServerToClient::JobAssignment { descriptor, peer_hints } => {
                 println!(
@@ -264,12 +321,19 @@ pub fn run_daemon(cfg: &DaemonConfig) -> Result<DaemonStats, String> {
                 );
 
                 for id in [&descriptor.manifest, &descriptor.elf, &descriptor.input] {
-                    fetch_blob(&mut stream, id, &peer_hints, &store, &counters)?;
+                    if let Err(e) = fetch_blob(&mut stream, id, &peer_hints, &store, counters) {
+                        eprintln!("[{}] blob fetch failed: {e} — connection lost", cfg.worker_id);
+                        return Ok((SessionEnd::ConnectionLost, stats_snapshot(counters)));
+                    }
                 }
 
                 // Materialize from the local (hash-verified) store.
-                let job_dir =
-                    std::env::temp_dir().join(format!("p2pc-worker-{}", descriptor.job_id));
+                // Per-WORKER directory: two workers running the same
+                // job concurrently must not share materialized files.
+                let job_dir = std::env::temp_dir().join(format!(
+                    "p2pc-worker-{}-{}",
+                    cfg.worker_id, descriptor.job_id
+                ));
                 std::fs::remove_dir_all(&job_dir).ok();
                 contentstore::materialize(&descriptor, &store, &job_dir)
                     .map_err(|e| format!("materialize: {e}"))?;
@@ -340,8 +404,15 @@ pub fn run_daemon(cfg: &DaemonConfig) -> Result<DaemonStats, String> {
                     &result.result_hash[..16.min(result.result_hash.len())],
                     result.instructions
                 );
-                wire::send(&mut stream, &ClientToServer::JobResult { result })
-                    .map_err(|e| e.to_string())?;
+                if let Err(e) =
+                    wire::send(&mut stream, &ClientToServer::JobResult { result })
+                {
+                    eprintln!(
+                        "[{}] result submit failed: {e} — connection lost",
+                        cfg.worker_id
+                    );
+                    return Ok((SessionEnd::ConnectionLost, stats_snapshot(counters)));
+                }
                 submitted = true;
             }
             other => return Err(format!("unexpected server message: {other:?}")),

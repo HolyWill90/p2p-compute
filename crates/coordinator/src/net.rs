@@ -340,10 +340,17 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
             }
             Event::BlobRequest { conn, id } => {
                 let mut map = conns.lock().unwrap();
+                let wid = map.get(&conn).map(|c| c.worker_id.clone()).unwrap_or_default();
                 if let Some(c) = map.get_mut(&conn) {
                     let data = contentstore::ContentId::from_hex(&id)
                         .ok()
                         .and_then(|cid| store.get(&cid).ok());
+                    println!(
+                        "blob request: {} asks {} -> {}",
+                        wid,
+                        &id[..12.min(id.len())],
+                        if data.is_some() { "FOUND" } else { "NOT FOUND" }
+                    );
                     let _ = c.outbound.send(ServerToClient::Blob {
                         hex: data.map(|d| hex(&d)),
                     });
@@ -492,7 +499,20 @@ fn session_reader(
             Ok(ClientToServer::JobResult { result }) => {
                 tx.send(Event::Result { conn, result }).ok();
             }
-            Err(wire::WireError::ConnectionClosed) | Err(_) => {
+            Err(e) => {
+                let wid = conns
+                    .lock()
+                    .unwrap()
+                    .get(&conn)
+                    .map(|c| c.worker_id.clone())
+                    .unwrap_or_else(|| format!("conn{conn}"));
+                if matches!(e, wire::WireError::ConnectionClosed) {
+                    println!("worker {wid}: connection closed by peer");
+                } else {
+                    // Non-close errors are the diagnostic trail for the
+                    // intermittent between-jobs drop.
+                    eprintln!("worker {wid}: reader error: {e}");
+                }
                 conns.lock().unwrap().remove(&conn);
                 tx.send(Event::Closed { conn }).ok();
                 break;
