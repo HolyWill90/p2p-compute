@@ -29,6 +29,9 @@ pub struct DaemonConfig {
     /// With `corrupt`: the hex digit the last hash character becomes,
     /// so two lying workers can fabricate DIFFERENT wrong results.
     pub corrupt_byte: Option<u8>,
+    /// When set: the coordinator's certificate (DER) — the session
+    /// runs over TLS pinned to this certificate's fingerprint.
+    pub tls: Option<Vec<u8>>,
 }
 
 /// Counters returned when the session ends — the evidence for which
@@ -118,7 +121,7 @@ fn spawn_peer_server(listener: TcpListener, store: Arc<contentstore::Store>, cou
 /// Every byte received is hash-verified against the requested id
 /// before being stored — no trust in any serving peer.
 fn fetch_blob(
-    stream: &mut TcpStream,
+    stream: &mut wire::BoxedStream,
     id_hex: &str,
     peer_hints: &[String],
     store: &contentstore::Store,
@@ -246,15 +249,45 @@ fn session_once(
         None => None,
     };
 
-    let stream = TcpStream::connect_timeout(
+    let tcp = TcpStream::connect_timeout(
         &cfg.server.parse().map_err(|e| format!("server addr: {e}"))?,
         std::time::Duration::from_secs(30),
     )
     .map_err(|e| format!("connect: {e}"))?;
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(3600)))
-        .ok();
-    let mut stream = stream;
+    let mut stream: wire::BoxedStream = match &cfg.tls {
+        Some(cert_der) => {
+            let client_cfg = wire::tls::client_config_pinned(cert_der)?;
+            let server_name = rustls::pki_types::ServerName::try_from(
+                cfg.server
+                    .split(':')
+                    .next()
+                    .unwrap_or("localhost")
+                    .to_string(),
+            )
+            .map_err(|e| format!("server name: {e}"))?;
+            let conn = rustls::ClientConnection::new(Arc::new(client_cfg), server_name)
+                .map_err(|e| format!("tls: {e}"))?;
+            let mut tls = rustls::StreamOwned::new(conn, tcp);
+            while tls.conn.is_handshaking() {
+                if let Err(e) = tls.conn.complete_io(&mut tls.sock) {
+                    eprintln!("[{}] tls handshake failed: {e}", cfg.worker_id);
+                    return Err(format!("tls handshake failed: {e}"));
+                }
+            }
+            println!(
+                "[{}] TLS session established (coordinator fingerprint pinned)",
+                cfg.worker_id
+            );
+            tls.sock
+                .set_read_timeout(Some(std::time::Duration::from_secs(3600)))
+                .ok();
+            Box::new(tls)
+        }
+        None => {
+            tcp.set_read_timeout(Some(std::time::Duration::from_secs(3600))).ok();
+            Box::new(tcp)
+        }
+    };
 
     let signing_key = cfg.identity_path.as_ref().map(|p| load_or_create_identity(p));
 

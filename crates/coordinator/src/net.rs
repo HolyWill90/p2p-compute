@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wire::{ClientToServer, ServerToClient};
@@ -37,6 +37,9 @@ pub struct ServeConfig {
     pub max_jobs: Option<usize>,
     /// Each finished job is sent here (for tests and monitors).
     pub job_tx: Option<Sender<JobOutcome>>,
+    /// When set, worker connections run over TLS with this server
+    /// certificate + key (DER).
+    pub tls: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +61,6 @@ enum Event {
         pubkey: String,
         worker_id: String,
         listen_port: Option<u16>,
-        peer_ip: String,
     },
     NonceSig { conn: usize, sig: String },
     BlobRequest { conn: usize, id: String },
@@ -74,6 +76,8 @@ struct Conn {
     authed: bool,
     /// p2p blob server advertised by this worker, if any.
     peer_addr: Option<String>,
+    /// The worker's IP, captured at accept time.
+    peer_ip: String,
 }
 
 struct PendingJob {
@@ -99,19 +103,26 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
     let (event_tx, event_rx) = channel::<Event>();
     let conns: Arc<Mutex<HashMap<usize, Conn>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Acceptor: each incoming connection gets a reader thread plus a
-    // dedicated writer thread (outbound traffic is queued so the main
-    // loop can push messages at any time).
+    // Acceptor: each incoming connection gets a session thread that
+    // owns the stream exclusively (polled receive + outbound queue) —
+    // one thread per connection works for both plain TCP and TLS,
+    // whose streams cannot be split for reader/writer threads.
     static NEXT_CONN: AtomicUsize = AtomicUsize::new(1);
     {
         let event_tx = event_tx.clone();
         let conns = conns.clone();
+        let tls_cfg = cfg
+            .tls
+            .as_ref()
+            .map(|(cert, key)| {
+                Arc::new(wire::tls::server_config(cert, key).expect("tls server config"))
+            });
         std::thread::spawn(move || {
             for stream in listener.incoming() {
-                let Ok(stream) = stream else { break };
+                let Ok(tcp) = stream else { break };
                 let id = NEXT_CONN.fetch_add(1, Ordering::SeqCst);
                 let (outbound, outbound_rx) = channel::<ServerToClient>();
-                let peer_ip = stream
+                let peer_ip = tcp
                     .peer_addr()
                     .map(|a| a.ip().to_string())
                     .unwrap_or_default();
@@ -124,21 +135,41 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                         worker_id: format!("w{id}"),
                         authed: false,
                         peer_addr: None,
+                        peer_ip: peer_ip.clone(),
                     },
                 );
-                {
-                    let mut writer = stream.try_clone().expect("clone stream");
-                    std::thread::spawn(move || {
-                        for msg in outbound_rx {
-                            if wire::send(&mut writer, &msg).is_err() {
-                                break;
-                            }
-                        }
-                    });
-                }
                 let tx = event_tx.clone();
                 let conns2 = conns.clone();
-                std::thread::spawn(move || session_reader(id, stream, tx, conns2));
+                let tls_cfg = tls_cfg.clone();
+                std::thread::spawn(move || {
+                    let boxed: wire::BoxedStream = match &tls_cfg {
+                        Some(server_cfg) => {
+                            let conn = rustls::ServerConnection::new(server_cfg.clone())
+                                .expect("tls connection");
+                            let (mut conn, mut sock) = rustls::StreamOwned::new(conn, tcp).into_parts();
+                            while conn.is_handshaking() {
+                                if let Err(e) = conn.complete_io(&mut sock) {
+                                    eprintln!("tls handshake failed for conn {id}: {e}");
+                                    return;
+                                }
+                            }
+                            let tls = rustls::StreamOwned::new(conn, sock);
+                            // The polled receive NEEDS this timeout: it
+                            // is what makes idle windows observable so
+                            // the outbound queue gets pumped.
+                            tls.sock
+                                .set_read_timeout(Some(Duration::from_millis(100)))
+                                .ok();
+                            Box::new(tls)
+                        }
+                        None => {
+                            tcp.set_read_timeout(Some(Duration::from_millis(100))).ok();
+                            Box::new(tcp)
+                        }
+                    };
+                    eprintln!("conn {id}: session started ({})", if tls_cfg.is_some() { "tls" } else { "plain" });
+                    session_loop(id, boxed, outbound_rx, tx, conns2);
+                });
             }
         });
     }
@@ -295,7 +326,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
         };
 
         match event {
-            Event::Hello { conn, pubkey, worker_id, listen_port, peer_ip } => {
+            Event::Hello { conn, pubkey, worker_id, listen_port } => {
                 let nonce: [u8; 32] = rand_nonce();
                 let nonce_hex = hex(&nonce);
                 let mut map = conns.lock().unwrap();
@@ -306,7 +337,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                     }
                     c.nonce = Some(nonce.to_vec());
                     if let Some(port) = listen_port {
-                        c.peer_addr = Some(format!("{peer_ip}:{port}"));
+                        c.peer_addr = Some(format!("{}:{port}", c.peer_ip));
                     }
                     let _ = c.outbound.send(ServerToClient::Nonce { hex: nonce_hex });
                 }
@@ -468,36 +499,49 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn session_reader(
+fn session_loop(
     conn: usize,
-    mut stream: TcpStream,
+    mut stream: wire::BoxedStream,
+    outbound_rx: Receiver<ServerToClient>,
     tx: Sender<Event>,
     conns: Arc<Mutex<HashMap<usize, Conn>>>,
 ) {
-    let peer_ip = stream
-        .peer_addr()
-        .map(|a| a.ip().to_string())
+    let peer_ip = conns
+        .lock()
+        .unwrap()
+        .get(&conn)
+        .map(|c| c.peer_ip.clone())
         .unwrap_or_default();
+    eprintln!("conn {conn}: session loop running");
     loop {
-        match wire::receive::<ClientToServer>(&mut stream) {
-            Ok(ClientToServer::Hello { pubkey_hex, worker_id, listen_port }) => {
-                tx.send(Event::Hello {
-                    conn,
-                    pubkey: pubkey_hex,
-                    worker_id,
-                    listen_port,
-                    peer_ip: peer_ip.clone(),
-                })
-                .ok();
+        let frame = wire::receive_polled::<ClientToServer>(&mut stream, Duration::from_millis(100));
+        if frame.is_err() {
+            eprintln!("conn {conn}: receive error: {:?}", frame.as_ref().err().unwrap());
+        }
+        match frame {
+            Ok(Some(ClientToServer::Hello { pubkey_hex, worker_id, listen_port })) => {
+                eprintln!("conn {conn}: Hello received");
+                tx.send(Event::Hello { conn, pubkey: pubkey_hex, worker_id, listen_port })
+                    .ok();
             }
-            Ok(ClientToServer::NonceSignature { sig_hex }) => {
+            Ok(Some(ClientToServer::NonceSignature { sig_hex })) => {
                 tx.send(Event::NonceSig { conn, sig: sig_hex }).ok();
             }
-            Ok(ClientToServer::BlobRequest { id_hex }) => {
+            Ok(Some(ClientToServer::BlobRequest { id_hex })) => {
                 tx.send(Event::BlobRequest { conn, id: id_hex }).ok();
             }
-            Ok(ClientToServer::JobResult { result }) => {
+            Ok(Some(ClientToServer::JobResult { result })) => {
                 tx.send(Event::Result { conn, result }).ok();
+            }
+            Ok(None) => {
+                // Idle window: push anything the main loop queued.
+                while let Ok(msg) = outbound_rx.try_recv() {
+                    if wire::send(&mut stream, &msg).is_err() {
+                        conns.lock().unwrap().remove(&conn);
+                        tx.send(Event::Closed { conn }).ok();
+                        return;
+                    }
+                }
             }
             Err(e) => {
                 let wid = conns

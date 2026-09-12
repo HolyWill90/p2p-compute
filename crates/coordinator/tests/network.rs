@@ -53,6 +53,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
         ledger: Some(root.join("ledger.json")),
         require_identity: true,
         pool: Some(2),
+        tls: None,
         bound_tx: Some(bound_tx),
         max_jobs: Some(3),
         job_tx: Some(job_tx),
@@ -88,6 +89,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
                 identity_path: Some(identity),
                 store_dir,
                 listen_port: Some(0),
+                tls: None,
                 corrupt: false,
                 corrupt_byte: None,
             })
@@ -104,6 +106,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
                 identity_path: Some(identity),
                 store_dir,
                 listen_port: None,
+                tls: None,
                 corrupt: false,
                 corrupt_byte: None,
             })
@@ -152,6 +155,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
                 identity_path: Some(identity),
                 store_dir,
                 listen_port: None,
+                tls: None,
                 corrupt: false,
                 corrupt_byte: None,
             })
@@ -192,4 +196,105 @@ fn multi_job_session_with_p2p_blob_exchange() {
     // Ledger: three jobs recorded.
     let ledger = coordinator::ledger::Ledger::load(&root.join("ledger.json")).unwrap();
     assert_eq!(ledger.history.len(), 3);
+}
+
+/// The same session over TLS: coordinator serves with a self-signed
+/// certificate, daemons pin its fingerprint, and the full job flow —
+/// auth, blob fetch, execution, signed result — runs encrypted.
+#[test]
+fn tls_network_session() {
+    let demo_elf = std::path::Path::new("../../jobs/demo-hash/program.elf");
+    if !demo_elf.exists() {
+        eprintln!("SKIP: build the demo job first");
+        return;
+    }
+    let root = temp_dir("p2pc-net-tls");
+    let jobs_dir = root.join("jobs");
+    let store_dir = root.join("store");
+    std::fs::create_dir_all(&jobs_dir).unwrap();
+    let store = contentstore::Store::open(&store_dir).unwrap();
+
+    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash"), &store).unwrap();
+    let cert_path = store_dir.join("coordinator-cert.der");
+
+    let (bound_tx, bound_rx) = channel();
+    let (job_tx, job_rx) = channel::<JobOutcome>();
+    let cfg = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        jobs_dir: jobs_dir.clone(),
+        store_dir: store_dir.clone(),
+        per_job_deadline: std::time::Duration::from_secs(90),
+        ledger: Some(root.join("ledger.json")),
+        require_identity: true,
+        pool: Some(2),
+        tls: None,
+        bound_tx: Some(bound_tx),
+        max_jobs: Some(1),
+        job_tx: Some(job_tx),
+    };
+
+    // Generate the coordinator certificate up front so the workers can
+    // pin it (in production, serve --tls generates it on first run).
+    let (cert, key) = wire::tls::generate_self_signed().unwrap();
+    std::fs::write(store_dir.join("coordinator-cert.der"), cert.as_ref()).unwrap();
+    std::fs::write(store_dir.join("coordinator-key.der"), key.secret_der()).unwrap();
+    let cert_der = std::fs::read(&cert_path).unwrap();
+
+    std::thread::spawn(move || {
+        let cfg = ServeConfig {
+            tls: Some((cert.as_ref().to_vec(), key.secret_der().to_vec())),
+            ..cfg
+        };
+        net::serve(cfg).expect("serve");
+    });
+    let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+
+    std::fs::write(
+        jobs_dir.join("job1.desc.json"),
+        serde_json::to_vec(&desc).unwrap(),
+    )
+    .unwrap();
+
+    let identities = root.join("identities");
+    std::fs::create_dir_all(&identities).unwrap();
+    let cert_copy = root.join("coordinator-cert.der");
+    std::fs::copy(store_dir.join("coordinator-cert.der"), &cert_copy).unwrap();
+
+    let mut handles = Vec::new();
+    for id in ["wA", "wB"] {
+        let server = bound.to_string();
+        let identity = identities.join(format!("{id}.key"));
+        let store_dir = root.join(format!("worker-store-{id}"));
+        let cert_copy = cert_copy.clone();
+        handles.push(std::thread::spawn(move || {
+            let tls = Some(std::fs::read(&cert_copy).expect("read coordinator cert"));
+            run_daemon(&DaemonConfig {
+                server,
+                worker_id: id.into(),
+                identity_path: Some(identity),
+                store_dir,
+                listen_port: None,
+                tls,
+                corrupt: false,
+                corrupt_byte: None,
+            })
+        }));
+    }
+
+    let job1 = wait_job(&job_rx);
+    assert_eq!(job1.job_id, "demo-hash-0001");
+    assert_eq!(job1.results.len(), 2);
+    assert_eq!(job1.results[0].result_hash, job1.results[1].result_hash);
+    let coordinator::Decision::Accept { hash, agreed, .. } = &job1.decision else {
+        panic!("job 1 should accept");
+    };
+    assert_eq!(agreed.len(), 2, "both TLS workers agreed");
+
+    // Digest sanity: matches the known demo-hash result.
+    assert_eq!(hash, "297c55c235e4e721cb10bddf7246c85a5ae592a46f889c35dfa896c14cbddba2");
+
+    for h in handles {
+        h.join().unwrap().unwrap();
+    }
+    let _ = cert_der;
 }

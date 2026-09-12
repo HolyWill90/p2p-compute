@@ -159,10 +159,36 @@ struct ServeArgs {
     store: PathBuf,
     #[arg(long)]
     ledger: Option<PathBuf>,
+    /// Run worker connections over TLS: generates a self-signed
+    /// certificate into the store dir on first run and prints its
+    /// fingerprint. Workers verify the fingerprint via --server-cert.
+    #[arg(long)]
+    tls: bool,
 }
 
 fn cmd_serve(args: ServeArgs) {
     let bind: std::net::SocketAddr = args.bind.parse().expect("parse bind address");
+    let args_tls = if args.tls {
+        let cert_path = args.store.join("coordinator-cert.der");
+        let key_path = args.store.join("coordinator-key.der");
+        let (cert, key) = if cert_path.exists() && key_path.exists() {
+            (
+                std::fs::read(&cert_path).expect("read cert"),
+                std::fs::read(&key_path).expect("read key"),
+            )
+        } else {
+            let (cert, key) = wire::tls::generate_self_signed().expect("generate cert");
+            std::fs::write(&cert_path, cert.as_ref()).expect("write cert");
+            std::fs::write(&key_path, key.secret_der()).expect("write key");
+            (cert.as_ref().to_vec(), key.secret_der().to_vec())
+        };
+        let fp = wire::tls::fingerprint_of_file(&cert_path).expect("fingerprint");
+        println!("TLS enabled — coordinator cert fingerprint (blake3): {fp}");
+        println!("copy {} to workers for --server-cert", cert_path.display());
+        Some((cert, key))
+    } else {
+        None
+    };
     let (job_tx, job_rx) = std::sync::mpsc::channel();
     let cfg = net::ServeConfig {
         bind,
@@ -172,6 +198,7 @@ fn cmd_serve(args: ServeArgs) {
         ledger: args.ledger,
         require_identity: true,
         pool: Some(args.pool),
+        tls: args_tls,
         bound_tx: None,
         max_jobs: args.max_jobs,
         job_tx: Some(job_tx),

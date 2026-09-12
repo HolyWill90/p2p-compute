@@ -10,6 +10,7 @@ jobfmt = { workspace = true }
 clap = { workspace = true }
 wire = { workspace = true }
 contentstore = { workspace = true }
+rustls = { workspace = true }
 serde_json = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand_core = { workspace = true }

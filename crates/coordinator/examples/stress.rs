@@ -37,6 +37,7 @@ fn main() {
         ledger: None,
         require_identity: true,
         pool: Some(2),
+        tls: None,
         bound_tx: Some(bound_tx),
         max_jobs: Some(jobs),
         job_tx: Some(job_tx),
@@ -69,6 +70,7 @@ fn main() {
                 identity_path: Some(identity),
                 store_dir,
                 listen_port: Some(0),
+                tls: None,
                 corrupt: false,
                 corrupt_byte: None,
             };

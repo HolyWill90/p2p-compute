@@ -70,6 +70,12 @@ struct DaemonArgs {
     /// Serve blobs to peers on this port (the p2p fetch path).
     #[arg(long)]
     listen_port: Option<u16>,
+    /// Run the session over TLS with this coordinator certificate
+    /// (raw DER, copied from the coordinator's store dir). The
+    /// certificate's fingerprint is pinned: no other server will be
+    /// accepted.
+    #[arg(long)]
+    server_cert: Option<PathBuf>,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -103,12 +109,17 @@ fn main() {
     match Cmd::parse() {
         Cmd::Run(a) => cmd_run(a),
         Cmd::Daemon(a) => {
+            let tls = a.server_cert.map(|p| {
+                std::fs::read(&p)
+                    .expect("read coordinator certificate")
+            });
             let cfg = worker::daemon::DaemonConfig {
                 server: a.server,
                 worker_id: a.id,
                 identity_path: Some(a.identity),
                 store_dir: a.store_dir,
                 listen_port: a.listen_port,
+                tls,
                 corrupt: a.corrupt,
                 corrupt_byte: a.corrupt_byte,
             };

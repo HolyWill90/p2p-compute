@@ -26,6 +26,8 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+rustls = { version = "0.23", features = ["ring"] }
+rcgen = "0.13"
 
 [workspace.package]
 version = "0.1.0"

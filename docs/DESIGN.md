@@ -196,8 +196,12 @@ from the dispatch decision.
    are not exchanged (the local judge can compare chains directly).
 4. Per-chunk snapshots live on the worker side only; the content store
    now makes inputs auditable — remaining: serving blobs over the network.
-5. Networking: TLS on the wire, NAT traversal, peer discovery beyond
-   the coordinator's hints.
+5. Networking: NAT traversal and peer discovery beyond the
+   coordinator's hints. (TLS on the wire is DONE: serve --tls
+   generates a self-signed coordinator cert, workers pin its
+   BLAKE3 fingerprint via --server-cert, sessions run on
+   rustls/TLS 1.3; worker identity stays the Ed25519 nonce
+   handshake.)
 6. FIXED — the intermittent between-jobs worker drop: root cause was a
    shared per-job temp directory (`temp/p2pc-worker-{job_id}`) — two
    workers materializing the same job concurrently raced on
