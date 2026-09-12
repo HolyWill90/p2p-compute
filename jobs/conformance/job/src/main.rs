@@ -234,8 +234,6 @@ pub extern "C" fn _start() -> ! {
             rel16back = out(reg) rel16back,
             lateout("a0") _,
         );
-        let rel16up = sp_mid.wrapping_sub(sp0);   // 496
-        let rel16back = sp_back.wrapping_sub(sp0); // 0
         push(63, rel4);      // 16
         push(64, rel16up);   // 496
         push(65, rel16back); // 0
