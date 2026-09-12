@@ -26,6 +26,7 @@ fn workspace_root() -> PathBuf {
 
 fn run_worker(worker: &Path, job_dir: &Path, id: &str, out: &Path) -> WorkerResult {
     let st = Command::new(worker)
+        .arg("run")
         .arg(job_dir)
         .arg("--out")
         .arg(out)

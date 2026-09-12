@@ -228,7 +228,7 @@ fn load_result(path: &Path) -> WorkerResult {
 fn run_worker(worker: &Path, job_dir: &Path, id: &str, extra: &[String]) -> WorkerResult {
     let out = std::env::temp_dir().join(format!("p2pc-{id}.json"));
     let mut cmd = Command::new(worker);
-    cmd.arg(job_dir).arg("--out").arg(&out).arg("--id").arg(id);
+    cmd.arg("run").arg(job_dir).arg("--out").arg(&out).arg("--id").arg(id);
     for a in extra {
         cmd.arg(a);
     }
