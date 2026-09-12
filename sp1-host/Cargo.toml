@@ -1,0 +1,13 @@
+[package]
+name = "sp1-host"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# Keep in sync with the guest's sp1-zkvm version.
+sp1-sdk = { version = "6.8.0", features = ["blocking"] }
+
+[build-dependencies]
+sp1-build = "6.8.0"

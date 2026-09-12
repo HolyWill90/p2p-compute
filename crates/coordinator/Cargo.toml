@@ -1,0 +1,18 @@
+[package]
+name = "coordinator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rvcore = { workspace = true }
+contentstore = { workspace = true }
+wire = { workspace = true }
+jobfmt = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+
+[dev-dependencies]
+worker = { workspace = true }

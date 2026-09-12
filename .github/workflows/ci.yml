@@ -1,0 +1,101 @@
+name: ci
+
+# The deterministic-runtime contract, enforced continuously:
+# every push, the emulator must produce byte-identical chunk hash
+# chains on three operating systems and two CPU architectures.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: riscv64imac-unknown-none-elf
+
+      - name: Unit tests (ISA + quorum logic)
+        run: cargo test --workspace
+
+      - name: Build demo job (RISC-V ELF)
+        working-directory: jobs/demo-hash/job
+        run: cargo build --release
+
+      - name: Install job ELF into job directory
+        shell: bash
+        run: cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash/program.elf
+
+      - name: Differential determinism (debug vs release on this OS)
+        run: cargo run --release -p difftest -- jobs/demo-hash
+
+      - name: Upload result hashes for cross-platform comparison
+        uses: actions/upload-artifact@v4
+        with:
+          name: hashes-${{ matrix.os }}
+          path: target/difftest-release.json
+
+  conformance:
+    # Independent-implementation differential: the same static RISC-V
+    # ELF executed by our emulator and by qemu-riscv64 must produce
+    # byte-identical output.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: riscv64imac-unknown-none-elf
+
+      - name: Build conformance job (RISC-V ELF)
+        working-directory: jobs/conformance/job
+        run: cargo build --release
+
+      - name: Install job ELF into job directory
+        run: cp jobs/conformance/job/target/riscv64imac-unknown-none-elf/release/conformance-isa jobs/conformance/program.elf
+
+      - name: Run under our emulator
+        run: cargo run --release -p conformance -- emu --elf jobs/conformance/program.elf --out target/conformance-emu.out
+
+      - name: Run under QEMU and compare
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user
+          qemu-riscv64 jobs/conformance/program.elf > target/conformance-qemu.out
+          cargo run --release -p conformance -- compare target/conformance-emu.out target/conformance-qemu.out
+
+  cross-verify:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all platform hashes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hashes-*
+          merge-multiple: true
+          path: hashes
+
+      - name: Assert chunk hash chains are identical across all platforms
+        run: |
+          python3 - <<'EOF'
+          import json, glob, sys
+          files = sorted(glob.glob('hashes/*.json'))
+          assert len(files) >= 3, f"expected 3 platforms, got {files}"
+          ref = json.load(open(files[0]))
+          for f in files[1:]:
+              other = json.load(open(f))
+              assert ref['chunk_hashes'] == other['chunk_hashes'], f"{f}: chunk chain differs!"
+              assert ref['result_hash'] == other['result_hash'], f"{f}: result hash differs!"
+              assert ref['output_hex'] == other['output_hex'], f"{f}: output differs!"
+          print(f"CROSS-PLATFORM PASS: {len(files)} platforms, {len(ref['chunk_hashes'])} chunks, result {ref['result_hash']}")
+          EOF

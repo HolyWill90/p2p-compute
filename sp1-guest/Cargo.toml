@@ -1,0 +1,11 @@
+[package]
+name = "sp1-guest-fnv"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# Keep this version in sync with the installed SP1 toolchain
+# (`~/.sp1/bin/cargo-prove prove --version`).
+sp1-zkvm = "6.8.0"

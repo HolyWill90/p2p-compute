@@ -1,0 +1,8 @@
+[package]
+name = "abi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+# no_std: this crate is shared between the host emulator and the
+# RISC-V job programs, so it must not link std.

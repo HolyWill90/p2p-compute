@@ -1,0 +1,9 @@
+[package]
+name = "difftest"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clap = { workspace = true }
+serde_json = { workspace = true }
+jobfmt = { workspace = true }

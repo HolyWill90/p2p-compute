@@ -1,0 +1,8 @@
+[package]
+name = "conformance"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rvcore = { workspace = true }
+clap = { workspace = true }

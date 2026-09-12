@@ -1,0 +1,202 @@
+# Design: deterministic verification substrate for P2P compute
+
+This workspace implements the foundation layer of a torrent-style peer-to-peer
+compute network. The insight driving every decision here: **verification is the
+hard part of P2P compute, and every verification mechanism is a consumer of one
+artifact — a deterministic VM that emits a hash of its state after every fixed
+chunk of instructions.** Quorum compares final hashes. Dispute games binary-search
+the chain to the first divergent chunk. zkVMs attach a proof to the same execution.
+Build the substrate first; the tiers plug into it.
+
+## Decision log
+
+### 1. Substrate: a pinned deterministic RISC-V VM (RV64IMC)
+
+- **RISC-V over WASM**: the leading zkVMs (SP1, RISC Zero, Jolt) all prove
+  RISC-V execution, so the same ELF workers run today can carry a zk proof
+  tomorrow with zero porting. RISC-V also has no spec ambiguity like WASM's
+  NaN bit-pattern nondeterminism.
+- **The pin is RV64IMC**: integer + mul/div + compressed. Atomics (`lr/sc`) and
+  floating point are outside the contract; jobs compile with
+  `-C target-feature=-a`. Compressed instructions are *accepted* — we tried to
+  exclude them (`-c`) and the toolchain fights back (lld's relax pass compresses
+  anyway because the object attributes claim C; `-relax` is unstable on stable
+  rustc). Accepting C matches what every real RISC-V toolchain produces.
+- **Determinism contract**, enforced by construction:
+  - the entire architectural state is 32 registers + pc + memory — there is no
+    hidden state to diverge (no flags, no clock, no ambient RNG);
+  - reads of unallocated pages are defined as zero; writes allocate;
+  - misaligned loads/stores trap; address space is a flat 4 GiB;
+  - `ecall` traps, `ebreak` halts cleanly, invalid encodings trap;
+  - traps and the instruction limit are themselves part of the canonical
+    chain (a trapped job has a well-defined identity too).
+- **Chunk hash chain**: after every `chunk_size` instructions and at exit,
+  emit `h_i = BLAKE3(h_{i-1} || x0..x31 || pc || memory_root)` where
+  `memory_root` is BLAKE3 over each allocated 4 KiB page in sorted index
+  order. The chain is what every verification tier consumes.
+
+### 2. Verification tiers (routing by job value)
+
+| Tier | Mechanism | Overhead | Status |
+|---|---|---|---|
+| Budget | Quorum N=3 → 5, bond slashing | ~3× | implemented (coordinator) |
+| Standard | Optimistic + dispute game (first-divergence + one-chunk judge from a verified snapshot, or full replay) | ~1× | implemented |
+| Strong | zkVM proof attached to the same ELF | 1× + prover tax | **VERIFIED**: same digest inside SP1 v6.8 as the emulator, receipt cryptographically verified |
+
+Quorum is *not* verification — it is bounded-risk economics: workers sampled
+independently at random, P(all N collude) = f^N, bonds make detected fraud
+unprofitable. It never proves a result correct; it makes wrong answers
+improbable and unprofitable. High-value jobs skip it for zk once the prover
+tax fits.
+
+### 3. Coordinator = the client (deliberately centralized)
+
+Verification protects the *client* from workers; it never required
+decentralizing the coordinator. For the substrate, the client runs its own
+coordinator and workers are untrusted processes. Decentralizing coordination
+(DHT job discovery, token escrow, watcher bounties) is a product decision for
+later, independent of verification correctness.
+
+### 4. What is deliberately NOT built
+
+- GPU / nondeterministic workloads: no bitwise story exists; they would route
+  to TEE attestation — a different tier, out of scope until the substrate is
+  proven.
+- Networking beyond process spawning: workers communicate only through result
+  JSON, which is exactly the real protocol surface.
+- Token, chain, consensus: nothing here needs them.
+
+## The two tests that matter
+
+1. **Differential determinism** (`difftest`): the same job through debug and
+   release builds locally, a Linux container, and — in CI — three operating
+   systems on two CPU architectures. All chunk hash chains must be
+   byte-identical. This is the deterministic contract, continuously proven.
+2. **Independent reference check**: the demo job's digest was verified against
+   an independent Python implementation of the same algorithm. Determinism
+   without correctness is worthless — both builds could agree on the wrong
+   answer.
+
+## Verified milestones
+
+- RV64IMC interpreter passes 35 unit tests: division/M-extension edges,
+  compressed-encoding register-field regressions, snapshot round-trips,
+  and one-chunk judge equivalence with full replay.
+- Demo job: 2 MiB input, 33.5M instructions, 33 chunks — digest matches an
+  independent Python reference byte-for-byte.
+- Differential determinism passes locally (debug vs release), in a Linux
+  container, and in CI across three operating systems and two architectures.
+- **Conformance differential vs QEMU**: the same static ELF executed by our
+  emulator and by `qemu-riscv64` produces byte-identical output over an
+  ISA corner-case suite (integer ALU, M-extension edges, all W-forms,
+  compressed instructions, branches/jumps, syscall ABI). This caught two
+  real bugs: an MULH/MULHSU sign-cast error and a write-syscall that did
+  not advance pc.
+- Dispute game: first divergence located, judged by one-chunk
+  re-execution from a hash-verified snapshot (fast path) or full replay —
+  both paths agree; forged snapshots fail the hash check by construction.
+- Optimistic acceptance: window/challenge state machine with a live demo
+  (unchallenged → accepted; challenged in window → dispute verdict).
+- Worker identities (Ed25519-signed results) and a persistent bond ledger
+  with balance accumulation across jobs and history.
+- Agent-task pilot job (`jobs/agent-task`): deterministic agent-shaped
+  batch transform, verified against an independent reference. Positioning
+  in `docs/PILOT.md`.
+- **zk tier proven end-to-end (SP1 v6.8)**: the demo algorithm compiled as
+  an SP1 guest, executed inside the zkVM, proved on CPU, receipt verified
+  — and the zkVM digest equals the emulator digest for the same input
+  (three-way match: emulator == zkVM == host reference). The pinned-ISA
+  strategy is no longer a claim; it is a demonstrated property.
+
+## Content-addressed store (the torrent layer, seeded)
+
+`crates/contentstore`: blobs addressed by BLAKE3, verified on every read;
+`publish` turns a job directory into a `JobDescriptor` (manifest + ELF +
+input hashes — the torrent-file analog); `materialize` reconstructs the job
+anywhere from the descriptor, byte-verified. Re-executing a materialized
+job produces the identical chunk-hash chain, so any third party can audit
+an execution without trusting the original client. CLI:
+`coordinator publish | fetch | verify`.
+
+## Adversarial hardening (demonstrated limits and defenses)
+
+Stated as tests (`crates/coordinator/tests/collusion.rs`), not prose claims:
+
+- **The collusion limit is real and documented**: two of three colluding
+  workers with an identical wrong answer BEAT the quorum tier — the test
+  asserts the wrong answer is accepted. Quorum is bounded-risk economics,
+  not truth. The defense is layered, not louder: any single honest
+  challenger escalates to the dispute game, which re-executes and wins —
+  demonstrated with a coherent mid-chain forger (divergence at chunk 5,
+  consistent fabrication thereafter): pinpointed at exactly chunk 5,
+  honest side vindicated, judged by re-execution truth.
+- **Disagreement-DoS is bounded and fail-closed**: a persistent attacker
+  forces at most 5 executions + 1 judge replay per attacked job, then the
+  job fails closed (Reject) — never an unbounded loop. Slashing makes the
+  attacker's ledger strictly worse (-100/job): 3 attacked jobs → -300,
+  client cost bounded at 15 executions.
+- **Benchmarks** (24-core x86-64 host, release build, single-threaded
+  interpreter): 22M instructions/sec; 33.5M-instruction job in 1.53s;
+  snapshots cost 2.11 MB per chunk (69.6 MB for the 2 MiB-input demo —
+  proportional to the job's memory footprint, an honest scaling limit for
+  large-working-set jobs).
+- **Known untested adversaries** (for the networked phase): result-copying
+  between workers (mitigation: per-worker input nonces with commit-reveal),
+  Sybil identity farming (mitigation: stake-weighted identity), and
+  economic attacks on the bond market itself.
+
+## Multi-job sessions and peer-to-peer blob exchange
+
+`coordinator serve --jobs-dir <dir>` is now a persistent session: it
+watches the directory for `*.desc.json` descriptors (produced by
+`coordinator publish`), dispatches each to connected workers, collects
+results, decides, updates the ledger, and broadcasts BetweenJobs — one
+job after another, with workers staying connected across all of them. A
+filename `name@w1,w2.desc.json` targets specific workers; round-1
+membership by id removes connection-order races. `--max-jobs` bounds a
+session (used by tests).
+
+**Peer-to-peer blob exchange is implemented and measured**: daemons with
+`--listen-port` serve blobs to peers over the `PeerToPeer` protocol;
+every JobAssignment carries peer hints; a worker fetches from peers
+first, coordinator as fallback, verifying every byte against the
+requested hash either way. The integration test proves the path with
+byte accounting: a fresh worker's three blobs all arrived from a seeded
+peer (`from_peers: 3, from_server: 0, served_to_peers: 3`), and its
+re-execution matched the original run's hash exactly.
+
+## Known gaps (next milestones)
+
+`crates/wire` (length-prefixed JSON frames) + `coordinator serve` +
+`worker daemon`: the coordinator accepts Ed25519-authenticated worker
+connections (nonce challenge-response at hello), dispatches jobs as
+content-store blobs **over the wire** (hash-verified on arrival by each
+worker), collects signed results from a pool, and runs the standard
+quorum/escalation — escalation included — across real sockets.
+
+Demonstrated by `crates/coordinator/tests/network.rs` over localhost TCP:
+five daemon connections, two lying with DIFFERENT fabricated results →
+no majority in round 1 → escalation dispatches the reserves → honest
+hash accepted, liars slashed in the ledger. A subtlety worth keeping:
+a corruption whose flipped byte lands on the honest value is
+indistinguishable from honesty — test flip values must be chosen against
+the honest tail.
+
+Deterministic round-1 membership: the coordinator names the round-1
+workers by id (`--round1-ids w1,w2,w5`), removing connection-order races
+from the dispatch decision.
+
+## Known gaps (next milestones)
+
+1. Official `riscv-arch-test` suite (the QEMU differential covers the
+   practical subset; the official suite is the exhaustive form).
+2. SP1 tier operationalization: proofs run in a container today; a
+   prover-market integration (or GPU proving) is the production step.
+3. Bisection dispute protocol for on-chain adjudication where full chains
+   are not exchanged (the local judge can compare chains directly).
+4. Per-chunk snapshots live on the worker side only; the content store
+   now makes inputs auditable — remaining: serving blobs over the network.
+5. Networking: TLS on the wire, NAT traversal, peer discovery beyond
+   the coordinator's hints, and one intermittent issue observed once in
+   testing (a worker dropped between jobs and reconnected — recovered,
+   root cause not yet pinned).

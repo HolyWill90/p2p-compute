@@ -1,0 +1,15 @@
+[package]
+name = "agent-task"
+version = "0.1.0"
+edition = "2021"
+
+# Detached from the outer workspace: this crate targets RISC-V.
+[workspace]
+
+[dependencies]
+abi = { path = "../../../crates/abi" }
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+codegen-units = 1

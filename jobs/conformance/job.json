@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "conformance-isa-0001",
+  "name": "conformance-isa",
+  "isa": "rv64imc",
+  "toolchain": "rustc 1.98.1, riscv64imac-unknown-none-elf, rust-lld, link.ld",
+  "chunk_size": 64,
+  "max_instructions": 10000000,
+  "verification_class": "conformance",
+  "elf": "program.elf",
+  "input": "input.bin"
+}

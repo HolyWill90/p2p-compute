@@ -1,0 +1,8 @@
+[package]
+name = "rvcore"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+abi = { workspace = true }
+blake3 = { workspace = true }
