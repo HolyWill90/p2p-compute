@@ -71,11 +71,25 @@ pub fn parse(bytes: &[u8]) -> Result<ElfImage, String> {
         if filesz > memsz {
             return Err("elf: filesz > memsz".into());
         }
+        // The segment must fit the pinned 4 GiB space; this bounds the
+        // BSS resize allocation and rejects absurd memsz claims. All
+        // arithmetic is checked — the fields are file-controlled.
+        let mem_end = match vaddr.checked_add(memsz) {
+            Some(e) => e,
+            None => return Err("elf: segment range overflows".into()),
+        };
+        if mem_end > crate::mem::ADDR_SPACE {
+            return Err("elf: segment exceeds the pinned address space".into());
+        }
         let off = offset as usize;
-        if off + filesz as usize > bytes.len() {
+        let file_end = match off.checked_add(filesz as usize) {
+            Some(e) => e,
+            None => return Err("elf: segment beyond file end".into()),
+        };
+        if file_end > bytes.len() {
             return Err("elf: segment beyond file end".into());
         }
-        let mut data = bytes[off..off + filesz as usize].to_vec();
+        let mut data = bytes[off..file_end].to_vec();
         data.resize(memsz as usize, 0); // BSS tail is zeros
         segments.push((vaddr, data));
     }

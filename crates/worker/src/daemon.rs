@@ -29,6 +29,9 @@ pub struct DaemonConfig {
     /// With `corrupt`: the hex digit the last hash character becomes,
     /// so two lying workers can fabricate DIFFERENT wrong results.
     pub corrupt_byte: Option<u8>,
+    /// Test hook: submit the result this many EXTRA times, emulating a
+    /// worker trying to stuff the quorum with duplicate votes.
+    pub extra_submits: u8,
     /// When set: the coordinator's certificate (DER) — the session
     /// runs over TLS pinned to this certificate's fingerprint.
     pub tls: Option<Vec<u8>>,
@@ -70,12 +73,9 @@ fn load_or_create_identity(path: &Path) -> SigningKey {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len() / 2)
-        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok())
-        .collect()
+    // Byte-based decoding: a char-boundary-straddling slice of a
+    // multi-byte UTF-8 string would panic, so never slice by index.
+    jobfmt::from_hex(s, s.len() / 2).ok()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -451,16 +451,7 @@ fn session_once(
                     set_last(chunk_hashes.last_mut().unwrap(), replacement);
                 }
 
-                let (pubkey_hex, sig_hex) = match &signing_key {
-                    Some(key) => {
-                        let msg = hex_decode(&result_hash).ok_or("hash: bad hex")?;
-                        let sig = key.sign(&msg);
-                        (Some(hex(&key.verifying_key().to_bytes())), Some(hex(&sig.to_bytes())))
-                    }
-                    None => (None, None),
-                };
-
-                let result = jobfmt::WorkerResult {
+                let mut result = jobfmt::WorkerResult {
                     worker_id: cfg.worker_id.clone(),
                     job_id: job.manifest.id,
                     status: status.to_string(),
@@ -469,9 +460,18 @@ fn session_once(
                     chunk_hashes,
                     output_hex: outcome.output.as_ref().map(|o| hex(o)),
                     trap,
-                    pubkey_hex,
-                    sig_hex,
+                    pubkey_hex: None,
+                    sig_hex: None,
                 };
+                // The signature binds the ENTIRE result (job id, status,
+                // instruction count, chain, output) — not just the final
+                // hash — so no field can be swapped post-signing.
+                if let Some(key) = &signing_key {
+                    let msg = jobfmt::signing_message(&result);
+                    let sig = key.sign(&msg);
+                    result.pubkey_hex = Some(hex(&key.verifying_key().to_bytes()));
+                    result.sig_hex = Some(hex(&sig.to_bytes()));
+                }
                 counters.jobs.fetch_add(1, Ordering::SeqCst);
                 println!(
                     "[{}] submitting result: {} after {} instructions",
@@ -479,14 +479,23 @@ fn session_once(
                     &result.result_hash[..16.min(result.result_hash.len())],
                     result.instructions
                 );
-                if let Err(e) =
-                    wire::send(&mut stream, &ClientToServer::JobResult { result })
-                {
-                    eprintln!(
-                        "[{}] result submit failed: {e} — connection lost",
-                        cfg.worker_id
-                    );
-                    return Ok((SessionEnd::ConnectionLost, stats_snapshot(counters)));
+                let mut submits = 1 + cfg.extra_submits as usize;
+                while submits > 0 {
+                    submits -= 1;
+                    if let Err(e) =
+                        wire::send(&mut stream, &ClientToServer::JobResult { result: result.clone() })
+                    {
+                        eprintln!(
+                            "[{}] result submit failed: {e} — connection lost",
+                            cfg.worker_id
+                        );
+                        return Ok((SessionEnd::ConnectionLost, stats_snapshot(counters)));
+                    }
+                    if submits > 0 {
+                        // Give the pump a beat so the duplicates arrive
+                        // as distinct frames while the job is pending.
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
                 }
                 submitted = true;
             }

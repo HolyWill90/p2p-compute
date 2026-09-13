@@ -1,4 +1,4 @@
-use abi::ELF_BASE;
+use abi::{ELF_BASE, STACK_TOP};
 use rvcore::interp::{execute_chunk_from, ChunkEnd, Config};
  #[allow(unused_imports)] use rvcore::snapshot::capture as _cap;
 use rvcore::{state_hash, Mem, GENESIS};
@@ -133,4 +133,35 @@ fn judge_one_chunk_from_snapshot_matches_full_replay() {
     if let Ok((cpu4, mem4)) = rvcore::snapshot::restore(&forged) {
         assert_ne!(state_hash(&prev, &cpu4, &mem4), chain[2]);
     }
+}
+
+
+#[test]
+fn forged_csr_in_snapshot_changes_state_hash() {
+    // CSRs are architectural (they route traps): a snapshot tampered
+    // in its CSR bytes must produce a different state hash, so a
+    // forged snapshot cannot pass the chain check with hidden state.
+    let mem = Mem::new();
+    let mut cpu = rvcore::Cpu::new(ELF_BASE, STACK_TOP);
+    cpu.mtvec = 0x8000_0100;
+    cpu.mepc = 0x8000_0200;
+    cpu.mstatus = 0x1800;
+    let snap = rvcore::snapshot::capture(&cpu, &mem);
+    let honest_hash = {
+        let (restored_cpu, restored_mem) = rvcore::snapshot::restore(&snap).unwrap();
+        state_hash(&GENESIS, &restored_cpu, &restored_mem)
+    };
+    // Flip a byte inside the CSR block (it rides after pc: 8 + 32 + 8
+    // bytes in, the first CSR word is mtvec).
+    let mut forged = snap.clone();
+    // Capture layout: magic+page-count header (8 bytes), x0..x31
+    // (256 bytes), pc (8 bytes), then the four CSRs.
+    let csr_start = 8 + 32 * 8 + 8;
+    assert_eq!(u64::from_le_bytes(forged[csr_start..csr_start + 8].try_into().unwrap()), 0x8000_0100);
+    forged[csr_start] ^= 0x01;
+    let forged_hash = {
+        let (forged_cpu, forged_mem) = rvcore::snapshot::restore(&forged).unwrap();
+        state_hash(&GENESIS, &forged_cpu, &forged_mem)
+    };
+    assert_ne!(honest_hash, forged_hash);
 }

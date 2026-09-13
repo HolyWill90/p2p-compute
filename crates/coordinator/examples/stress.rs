@@ -73,6 +73,7 @@ fn main() {
                 tls: None,
                 corrupt: false,
                 corrupt_byte: None,
+                extra_submits: 0,
             };
             let mut drops = 0usize;
             loop {

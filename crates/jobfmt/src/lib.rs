@@ -32,6 +32,25 @@ pub struct Job {
 
 pub const SCHEMA: u32 = 1;
 
+/// The manifest names plain files inside the job directory. A manifest
+/// is untrusted data (it arrives over the wire inside a descriptor), so
+/// its file fields must not escape: exactly one normal path component,
+/// no separators, no `..`.
+pub fn confined_name(name: &str) -> Result<(), String> {
+    let p = Path::new(name);
+    let ok = p.is_relative()
+        && p.components().collect::<Vec<_>>().len() == 1
+        && matches!(
+            p.components().next(),
+            Some(std::path::Component::Normal(_))
+        );
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("manifest path {name:?} is not a plain file name"))
+    }
+}
+
 pub fn load_dir(dir: &Path) -> Result<Job, String> {
     let manifest_path = dir.join("job.json");
     let raw = std::fs::read(&manifest_path)
@@ -48,6 +67,8 @@ pub fn load_dir(dir: &Path) -> Result<Job, String> {
             abi::ISA
         ));
     }
+    confined_name(&manifest.elf)?;
+    confined_name(&manifest.input)?;
     let elf = std::fs::read(dir.join(&manifest.elf))
         .map_err(|e| format!("reading elf: {e}"))?;
     let input = std::fs::read(dir.join(&manifest.input))
@@ -56,6 +77,8 @@ pub fn load_dir(dir: &Path) -> Result<Job, String> {
 }
 
 pub fn save_dir(dir: &Path, manifest: &JobManifest, elf: &[u8], input: &[u8]) -> Result<(), String> {
+    confined_name(&manifest.elf)?;
+    confined_name(&manifest.input)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?;
     let json = serde_json::to_vec_pretty(manifest).unwrap();
     std::fs::write(dir.join("job.json"), json).map_err(|e| format!("{e}"))?;
@@ -84,8 +107,143 @@ pub struct WorkerResult {
     /// Ed25519 public key of the worker (hex), when it has an identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pubkey_hex: Option<String>,
-    /// Ed25519 signature over the raw result-hash bytes (hex). Binds
-    /// the identity to the claimed result.
+    /// Ed25519 signature over `signing_message(self)` (hex). Binds the
+    /// identity to the ENTIRE result — job id, status, instruction
+    /// count, hash chain, and output — not just the final hash.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sig_hex: Option<String>,
+}
+
+/// The exact bytes a worker signs and a coordinator verifies: a
+/// length-prefixed encoding of every result field except the key and
+/// signature themselves. Explicit encoding rather than JSON so the
+/// binding cannot drift with serde version or field ordering.
+pub fn signing_message(r: &WorkerResult) -> Vec<u8> {
+    let mut m = Vec::new();
+    let put = |m: &mut Vec<u8>, b: &[u8]| {
+        m.extend_from_slice(&(b.len() as u32).to_le_bytes());
+        m.extend_from_slice(b);
+    };
+    put(&mut m, r.worker_id.as_bytes());
+    put(&mut m, r.job_id.as_bytes());
+    put(&mut m, r.status.as_bytes());
+    m.extend_from_slice(&r.instructions.to_le_bytes());
+    put(&mut m, r.result_hash.as_bytes());
+    for h in &r.chunk_hashes {
+        put(&mut m, h.as_bytes());
+    }
+    match &r.output_hex {
+        Some(o) => put(&mut m, o.as_bytes()),
+        None => m.extend_from_slice(&0u32.to_le_bytes()),
+    }
+    match &r.trap {
+        Some(t) => put(&mut m, t.as_bytes()),
+        None => m.extend_from_slice(&0u32.to_le_bytes()),
+    }
+    m
+}
+
+/// Hex decode failure: which string shape was rejected and why.
+#[derive(Debug)]
+pub enum HexError {
+    BadLength { got: usize, want: usize },
+    InvalidByte(u8),
+}
+
+impl std::fmt::Display for HexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HexError::BadLength { got, want } => write!(f, "bad length {got}/{want}"),
+            HexError::InvalidByte(b) => write!(f, "invalid hex byte {b:#04x}"),
+        }
+    }
+}
+
+/// Panic-free fixed-length hex decode: exact length required, ASCII
+/// hex only. Untrusted strings (pubkeys, signatures, hashes) arrive
+/// over the wire — a byte-offset slice of a multi-byte UTF-8 char
+/// would panic the caller, so decoding works on bytes instead.
+pub fn from_hex(s: &str, expect: usize) -> Result<Vec<u8>, HexError> {
+    if s.len() != expect * 2 {
+        return Err(HexError::BadLength { got: s.len(), want: expect * 2 });
+    }
+    let b = s.as_bytes();
+    let digit = |c: u8| -> Result<u32, HexError> {
+        match c {
+            b'0'..=b'9' => Ok((c - b'0') as u32),
+            b'a'..=b'f' => Ok((c - b'a' + 10) as u32),
+            b'A'..=b'F' => Ok((c - b'A' + 10) as u32),
+            other => Err(HexError::InvalidByte(other)),
+        }
+    };
+    b.as_chunks::<2>().0.iter()
+        .map(|pair| {
+            let hi = digit(pair[0])?;
+            let lo = digit(pair[1])?;
+            Ok(((hi << 4) | lo) as u8)
+        })
+        .collect()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confined_name_accepts_only_plain_names() {
+        assert!(confined_name("program.elf").is_ok());
+        assert!(confined_name("../escape").is_err());
+        assert!(confined_name("a/b").is_err());
+        assert!(confined_name("a\\b").is_err());
+        assert!(confined_name("..").is_err());
+        assert!(confined_name("/abs").is_err());
+        assert!(confined_name("C:\\temp\\x").is_err());
+    }
+
+    #[test]
+    fn from_hex_is_byte_safe() {
+        assert_eq!(from_hex("00ff", 2).unwrap(), vec![0x00, 0xff]);
+        assert!(from_hex("00f", 2).is_err()); // short
+        assert!(from_hex("00fg", 2).is_err()); // non-hex
+        // 32 repetitions of a two-byte UTF-8 char: right BYTE length,
+        // but a byte-offset slice would straddle a char and panic.
+        assert!(from_hex(&"\u{e9}".repeat(32), 32).is_err());
+    }
+
+    #[test]
+    fn signing_message_binds_every_field() {
+        let base = WorkerResult {
+            worker_id: "w".into(),
+            job_id: "j".into(),
+            status: "halted".into(),
+            instructions: 7,
+            result_hash: "aa".into(),
+            chunk_hashes: vec!["aa".into(), "bb".into()],
+            output_hex: Some("cc".into()),
+            trap: None,
+            pubkey_hex: Some("pk".into()),
+            sig_hex: Some("sig".into()),
+        };
+        let m0 = signing_message(&base);
+        // The key and signature are NOT part of the message (they are
+        // what authenticates it) — their presence must not change it.
+        let mut no_meta = base.clone();
+        no_meta.pubkey_hex = None;
+        no_meta.sig_hex = None;
+        assert_eq!(m0, signing_message(&no_meta));
+
+        let mut r = base.clone();
+        r.output_hex = None;
+        assert_ne!(m0, signing_message(&r));
+        let mut r = base.clone();
+        r.instructions = 8;
+        assert_ne!(m0, signing_message(&r));
+        let mut r = base.clone();
+        r.chunk_hashes = vec!["aa".into()];
+        assert_ne!(m0, signing_message(&r));
+        let mut r = base.clone();
+        r.trap = Some("boom".into());
+        assert_ne!(m0, signing_message(&r));
+    }
 }

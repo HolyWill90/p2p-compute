@@ -43,18 +43,20 @@ jobs:
 
       - name: Differential determinism (debug vs release on this OS)
         run: |
-          cargo run --release -p difftest -- jobs/demo-hash
-          cargo run --release -p difftest -- jobs/demo-hash-smoke
+          cargo run --release -p difftest -- jobs/demo-hash --out-prefix demo-hash
+          cargo run --release -p difftest -- jobs/demo-hash-smoke --out-prefix demo-hash-smoke
 
-      - name: Stage result hash with a per-OS filename
+      - name: Stage result hashes with per-OS filenames
         shell: bash
-        run: cp target/difftest-release.json "difftest-release-${{ matrix.os }}.json"
+        run: |
+          cp target/demo-hash-release.json "demo-hash-release-${{ matrix.os }}.json"
+          cp target/demo-hash-smoke-release.json "demo-hash-smoke-release-${{ matrix.os }}.json"
 
       - name: Upload result hashes for cross-platform comparison
         uses: actions/upload-artifact@v4
         with:
           name: hashes-${{ matrix.os }}
-          path: difftest-release-${{ matrix.os }}.json
+          path: "*-release-${{ matrix.os }}.json"
 
   conformance:
     # Independent-implementation differential: the same static RISC-V
@@ -104,13 +106,19 @@ jobs:
         run: |
           python3 - <<'EOF'
           import json, glob, sys
-          files = sorted(glob.glob('hashes/*.json'))
-          assert len(files) >= 3, f"expected 3 platforms, got {files}"
-          ref = json.load(open(files[0]))
-          for f in files[1:]:
-              other = json.load(open(f))
-              assert ref['chunk_hashes'] == other['chunk_hashes'], f"{f}: chunk chain differs!"
-              assert ref['result_hash'] == other['result_hash'], f"{f}: result hash differs!"
-              assert ref['output_hex'] == other['output_hex'], f"{f}: output differs!"
-          print(f"CROSS-PLATFORM PASS: {len(files)} platforms, {len(ref['chunk_hashes'])} chunks, result {ref['result_hash']}")
+          # Compare each JOB's results across platforms (the job name is
+          # the filename prefix before the -release-<os> suffix).
+          jobs = {}
+          for f in glob.glob('hashes/*.json'):
+              stem = f.rsplit('-release-', 1)[0]
+              jobs.setdefault(stem, []).append(f)
+          for stem, files in sorted(jobs.items()):
+              assert len(files) >= 3, f"{stem}: expected 3 platforms, got {files}"
+              ref = json.load(open(sorted(files)[0]))
+              for f in sorted(files)[1:]:
+                  other = json.load(open(f))
+                  assert ref['chunk_hashes'] == other['chunk_hashes'], f"{f}: chunk chain differs!"
+                  assert ref['result_hash'] == other['result_hash'], f"{f}: result hash differs!"
+                  assert ref['output_hex'] == other['output_hex'], f"{f}: output differs!"
+              print(f"CROSS-PLATFORM PASS: {stem}: {len(files)} platforms, {len(ref['chunk_hashes'])} chunks, result {ref['result_hash']}")
           EOF

@@ -17,3 +17,4 @@ rustls = { workspace = true }
 
 [dev-dependencies]
 worker = { workspace = true }
+ed25519-dalek = { workspace = true }

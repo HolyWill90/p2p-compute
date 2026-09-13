@@ -18,6 +18,11 @@ struct Args {
     /// compare hashes against the local run.
     #[arg(long)]
     docker: Option<String>,
+    /// Prefix for the result JSONs (target/<prefix>-debug.json and
+    /// target/<prefix>-release.json). Distinct jobs need distinct
+    /// prefixes or a later run overwrites the earlier artifacts.
+    #[arg(long, default_value = "difftest")]
+    out_prefix: String,
 }
 
 fn workspace_root() -> PathBuf {
@@ -111,8 +116,8 @@ fn main() {
         assert!(st.success(), "worker build failed ({profile})");
     }
 
-    let out_a = target.join("difftest-debug.json");
-    let out_b = target.join("difftest-release.json");
+    let out_a = target.join(format!("{}-debug.json", args.out_prefix));
+    let out_b = target.join(format!("{}-release.json", args.out_prefix));
     let a = run_worker(&worker_debug, &job_dir, "debug", &out_a);
     let b = run_worker(&worker_release, &job_dir, "release", &out_b);
 

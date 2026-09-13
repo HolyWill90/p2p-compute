@@ -591,6 +591,21 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
 
                 if let Some(job) = &mut pending {
                     if result.job_id == job.descriptor.job_id {
+                        // Quorum integrity: only workers the job was
+                        // actually dispatched to may vote, and each
+                        // dispatched worker gets exactly one vote. A
+                        // duplicate submission could otherwise inflate
+                        // its author's group into a fake majority.
+                        if !job.dispatched_ids.iter().any(|id| id == &wid) {
+                            eprintln!(
+                                "SECURITY: result from non-dispatched worker {wid} dropped"
+                            );
+                            continue;
+                        }
+                        if job.results.iter().any(|r| r.worker_id == wid) {
+                            eprintln!("SECURITY: duplicate result from {wid} dropped");
+                            continue;
+                        }
                         println!("result accepted: {wid} → {}", &result.result_hash[..12]);
                         job.results.push(result);
                     }
@@ -702,14 +717,15 @@ fn shutdown_all(conns: &Mutex<HashMap<usize, Conn>>, reason: &str) {
 }
 
 fn verify_nonce(pubkey_hex: &str, nonce_hex: &[u8], sig_hex: &str) -> Result<(), String> {
-    let decode = |s: &str, n: usize| -> Result<Vec<u8>, String> {
-        (0..n)
-            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|e| e.to_string()))
-            .collect()
-    };
-    let pk = VerifyingKey::from_bytes(&decode(pubkey_hex, 32)?.try_into().unwrap())
+    // The pubkey and signature strings arrive over the wire BEFORE the
+    // sender is authenticated: decoding must never panic (no index
+    // slicing of possibly-multi-byte UTF-8, exact lengths required).
+    let pk_bytes =
+        jobfmt::from_hex(pubkey_hex, 32).map_err(|e| format!("pubkey: {e}"))?;
+    let sig_bytes = jobfmt::from_hex(sig_hex, 64).map_err(|e| format!("signature: {e}"))?;
+    let pk = VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap())
         .map_err(|e| format!("{e}"))?;
-    let sig = Signature::from_bytes(&decode(sig_hex, 64)?.try_into().unwrap());
+    let sig = Signature::from_bytes(&sig_bytes.try_into().unwrap());
     pk.verify(nonce_hex, &sig).map_err(|e| format!("{e}"))
 }
 

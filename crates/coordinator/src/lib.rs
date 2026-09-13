@@ -39,9 +39,17 @@ fn group_by<'a>(results: &[&'a WorkerResult]) -> Vec<(String, Vec<&'a WorkerResu
 /// `pool` is the number of results in this round (3 = initial, 5 =
 /// after one escalation). Threshold is a strict majority.
 pub fn decide(pool_results: &[WorkerResult]) -> Decision {
-    let pool = pool_results.len();
+    // One vote per worker, even if a caller hands us raw duplicates:
+    // quorum counts workers, not messages. (The network layer also
+    // enforces this at receipt; this is the second line of defense.)
+    let mut seen = std::collections::HashSet::new();
+    let deduped: Vec<&WorkerResult> = pool_results
+        .iter()
+        .filter(|r| seen.insert(r.worker_id.clone()))
+        .collect();
+    let pool = deduped.len();
     let threshold = pool / 2 + 1;
-    let refs: Vec<&WorkerResult> = pool_results.iter().collect();
+    let refs: Vec<&WorkerResult> = deduped;
 
     let halted: Vec<&WorkerResult> = refs.iter().copied().filter(|r| r.status == "halted").collect();
     let trapped = pool - halted.len();
@@ -106,25 +114,21 @@ pub fn slashing(decision: &Decision, pool_results: &[WorkerResult]) -> Vec<(Stri
     }
 }
 
-/// Verify a worker's Ed25519 signature over its claimed result hash.
-/// An unsigned result fails only when the coordinator requires
-/// identities — callers decide the policy; this function is the check.
+/// Verify a worker's Ed25519 signature over the ENTIRE result — job
+/// id, status, instruction count, hash chain, and output, via
+/// [`jobfmt::signing_message`]. Any field tampered after signing fails
+/// verification. An unsigned result fails only when the coordinator
+/// requires identities — callers decide the policy; this function is
+/// the check. All decoding is panic-free: the strings are untrusted.
 pub fn verify_signature(r: &WorkerResult) -> Result<(), String> {
     let (pk_hex, sig_hex) = match (&r.pubkey_hex, &r.sig_hex) {
         (Some(pk), Some(sig)) => (pk, sig),
         _ => return Err("result is unsigned".into()),
     };
-    let decode = |s: &str, expect: usize| -> Result<Vec<u8>, String> {
-        if s.len() != expect * 2 {
-            return Err(format!("bad length {}/{}", s.len(), expect * 2));
-        }
-        (0..expect)
-            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|e| e.to_string()))
-            .collect()
-    };
-    let pk_bytes = decode(pk_hex, 32).map_err(|e| format!("pubkey: {e}"))?;
-    let sig_bytes = decode(sig_hex, 64).map_err(|e| format!("signature: {e}"))?;
-    let msg = decode(&r.result_hash, 32).map_err(|e| format!("hash: {e}"))?;
+    let bad = |what: &str, e: jobfmt::HexError| format!("{what}: {e}");
+    let pk_bytes = jobfmt::from_hex(pk_hex, 32).map_err(|e| bad("pubkey", e))?;
+    let sig_bytes = jobfmt::from_hex(sig_hex, 64).map_err(|e| bad("signature", e))?;
+    let msg = jobfmt::signing_message(r);
     let vk = VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap())
         .map_err(|e| format!("pubkey: {e}"))?;
     let sig = Signature::from_bytes(&sig_bytes.try_into().unwrap());

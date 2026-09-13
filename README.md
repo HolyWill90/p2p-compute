@@ -120,8 +120,9 @@ The emulator guarantees:
 - `ecall` traps (QEMU-compatible syscall mode for the conformance
   differential); `ebreak` → clean halt; output is read from the ABI's
   output region;
-- hash chain: `BLAKE3(prev_hash || registers || pc || memory_root)` emitted
-  every `chunk_size` instructions and at exit.
+- hash chain: `BLAKE3(prev_hash || registers || pc || mtvec || mepc ||
+  mcause || mstatus || memory_root)` emitted every `chunk_size`
+  instructions and at exit — every architectural field is bound.
 
 Any two machines that run the same job and disagree on a single chunk hash
 have found a bug — the CI differential test exists to make that never happen

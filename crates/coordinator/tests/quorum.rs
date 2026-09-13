@@ -116,3 +116,96 @@ fn trapped_minority_with_majority_accepts() {
     let d = decide(&[w("w1", "aaa"), trapped("w2", "aaa"), w("w3", "aaa")]);
     assert!(matches!(d, Decision::Accept { .. }));
 }
+
+
+#[test]
+fn duplicate_votes_do_not_stuff_quorum() {
+    // One worker's repeated submissions must not manufacture a
+    // majority: quorum counts workers, not messages.
+    let d = decide(&[w("w1", "aaa"), w("w1", "aaa"), w("w2", "bbb")]);
+    assert!(matches!(d, Decision::Escalate), "got {d:?}");
+    let d = decide(&[w("w2", "bbb"), w("w2", "bbb"), w("w1", "aaa")]);
+    assert!(matches!(d, Decision::Escalate), "got {d:?}");
+}
+
+mod signature_binding {
+    use super::*;
+    use coordinator::verify_signature;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A worker-signed result: the signature covers every field via
+    /// jobfmt::signing_message.
+    fn signed(id: &str, hash: &str) -> WorkerResult {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let mut r = w(id, hash);
+        r.output_hex = Some("0123abcd".into());
+        r.instructions = 42;
+        let msg = jobfmt::signing_message(&r);
+        let sig = key.sign(&msg);
+        r.pubkey_hex = Some(hex(&key.verifying_key().to_bytes()));
+        r.sig_hex = Some(hex(&sig.to_bytes()));
+        r
+    }
+
+    #[test]
+    fn signed_result_verifies() {
+        assert!(verify_signature(&signed("w1", "aaa")).is_ok());
+    }
+
+    #[test]
+    fn unsigned_result_fails() {
+        assert!(verify_signature(&w("w1", "aaa")).is_err());
+    }
+
+    #[test]
+    fn tampering_any_field_breaks_verification() {
+        let base = signed("w1", "aaa");
+
+        let mut r = base.clone();
+        r.output_hex = Some("deadbeef".into());
+        assert!(verify_signature(&r).is_err(), "output must be bound");
+
+        let mut r = base.clone();
+        r.job_id = "other-job".into();
+        assert!(verify_signature(&r).is_err(), "job id must be bound");
+
+        let mut r = base.clone();
+        r.chunk_hashes = vec!["bbb".into()];
+        assert!(verify_signature(&r).is_err(), "chain must be bound");
+
+        let mut r = base.clone();
+        r.instructions = 43;
+        assert!(verify_signature(&r).is_err(), "instruction count must be bound");
+
+        let mut r = base.clone();
+        r.status = "trap".into();
+        assert!(verify_signature(&r).is_err(), "status must be bound");
+
+        let mut r = base.clone();
+        r.result_hash = "bbb".into();
+        assert!(verify_signature(&r).is_err(), "result hash must be bound");
+
+        let mut r = base.clone();
+        r.worker_id = "w2".into();
+        assert!(verify_signature(&r).is_err(), "worker id must be bound");
+    }
+
+    #[test]
+    fn malformed_hex_fails_without_panic() {
+        let mut r = signed("w1", "aaa");
+        // 64 bytes long in BYTES but containing multi-byte UTF-8: the
+        // old byte-offset slicing panicked on this input.
+        r.pubkey_hex = Some("é".repeat(32));
+        assert!(verify_signature(&r).is_err());
+        r = signed("w1", "aaa");
+        r.sig_hex = Some("zz".repeat(64));
+        assert!(verify_signature(&r).is_err());
+        r = signed("w1", "aaa");
+        r.sig_hex = Some("a".repeat(63)); // short
+        assert!(verify_signature(&r).is_err());
+    }
+}

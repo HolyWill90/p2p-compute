@@ -37,9 +37,41 @@ Build the substrate first; the tiers plug into it.
   - traps and the instruction limit are themselves part of the canonical
     chain (a trapped job has a well-defined identity too).
 - **Chunk hash chain**: after every `chunk_size` instructions and at exit,
-  emit `h_i = BLAKE3(h_{i-1} || x0..x31 || pc || memory_root)` where
-  `memory_root` is BLAKE3 over each allocated 4 KiB page in sorted index
-  order. The chain is what every verification tier consumes.
+  emit `h_i = BLAKE3(h_{i-1} || x0..x31 || pc || mtvec || mepc || mcause
+  || mstatus || memory_root)` where `memory_root` is BLAKE3 over each
+  allocated 4 KiB page in sorted index order. The chain is what every
+  verification tier consumes. The machine CSRs are architectural (trap
+  routing affects execution), so they are hashed: a snapshot carrying
+  different CSR state cannot pass the chain check.
+- **SECURITY AUDIT (external, 2026-09-14) — all findings fixed**:
+  - *Quorum vote stuffing*: results were appended without checking that
+    the worker was dispatched, and duplicates were counted — one
+    authenticated worker could fabricate a majority. The network layer
+    now drops results from non-dispatched workers and enforces one vote
+    per worker per job; `decide()` deduplicates defensively too.
+  - *Incomplete signatures*: only `result_hash` was signed. Workers now
+    sign `jobfmt::signing_message` — a length-prefixed encoding of job
+    id, status, instruction count, full chain, output, and trap detail
+    — so no field can be swapped post-signing. Output consistency is
+    covered by the chain (the output region is hashed into state).
+  - *Dispute-state omission*: `state_hash` omitted the machine CSRs
+    while snapshots carried them, so a forged snapshot could redirect
+    trap handling and still verify. CSRs are now hashed.
+  - *Arbitrary host-file writes*: manifest file fields were joined into
+    the output directory unconstrained during materialization. They are
+    now confined to a single plain file name (write and read side).
+  - *Unchecked arithmetic*: `addr + len` in the memory model and ELF
+    loader could overflow (debug panic / release wrap past the bounds
+    check). All guest-controlled range checks use `checked_add`; ELF
+    segment ranges must fit the pinned 4 GiB space.
+  - *Pre-authentication panic*: nonce/pubkey hex decoding sliced
+    attacker-controlled strings at byte offsets — a short or multi-byte
+    string panicked the coordinator before authentication. All wire
+    hex now decodes through a panic-free `jobfmt::from_hex`.
+  - *CI cross-verify gap*: the smoke differential overwrote the full
+    job's staged artifact, so cross-platform comparison only covered
+    the one-chunk smoke run. difftest takes `--out-prefix` and both
+    jobs are staged and compared per job across all platforms.
 
 ### 2. Verification tiers (routing by job value)
 

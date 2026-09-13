@@ -9,6 +9,7 @@
 //!          wC's from-server counter stays zero.
 
 use coordinator::net::{self, JobOutcome, ServeConfig};
+use ed25519_dalek::Signer;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use worker::daemon::{run_daemon, DaemonConfig};
@@ -102,6 +103,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
                 tls: None,
                 corrupt: false,
                 corrupt_byte: None,
+                extra_submits: 0,
             })
         }));
     }
@@ -119,6 +121,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
                 tls: None,
                 corrupt: false,
                 corrupt_byte: None,
+                extra_submits: 0,
             })
         }));
     }
@@ -160,6 +163,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
                 tls: None,
                 corrupt: false,
                 corrupt_byte: None,
+                extra_submits: 0,
             })
         }));
     }
@@ -277,6 +281,7 @@ fn tls_network_session() {
                 tls,
                 corrupt: false,
                 corrupt_byte: None,
+                extra_submits: 0,
             })
         }));
     }
@@ -291,7 +296,7 @@ fn tls_network_session() {
     assert_eq!(agreed.len(), 2, "both TLS workers agreed");
 
     // Digest sanity: matches the known demo-hash-smoke result.
-    assert_eq!(hash, "ec48428c70dc764655f78d63389bd3be14275f129cb72c6fa5c007d8692c8662");
+    assert_eq!(hash, "67925f935808b41f326dd1f183e8e2951ac8d01f647e0d987f2cefa8944879b5");
 
     for h in handles {
         h.join().unwrap().unwrap();
@@ -351,7 +356,7 @@ fn reserve_escalation_beats_lying_worker() {
     // wC, whose result joins wA's for the 2/3 accept.
     let spawns: Vec<(&str, bool, Option<u8>)> = vec![
         ("wA", false, None),
-        ("wB", true, Some(5)),
+        ("wB", true, Some(9)), // honest tail is 5 — 9 diverges
         ("wC", false, None),
     ];
     for (id, corrupt, byte) in spawns {
@@ -368,6 +373,7 @@ fn reserve_escalation_beats_lying_worker() {
                 tls: None,
                 corrupt,
                 corrupt_byte: byte,
+                extra_submits: 0,
             })
         }));
     }
@@ -376,7 +382,7 @@ fn reserve_escalation_beats_lying_worker() {
     let coordinator::Decision::Accept { hash, agreed, .. } = &job1.decision else {
         panic!("escalation should end in accept, got {:?}", job1.decision);
     };
-    assert_eq!(hash, "ec48428c70dc764655f78d63389bd3be14275f129cb72c6fa5c007d8692c8662");
+    assert_eq!(hash, "67925f935808b41f326dd1f183e8e2951ac8d01f647e0d987f2cefa8944879b5");
     assert_eq!(agreed, &vec!["wA".to_string(), "wC".to_string()]);
     for h in handles {
         h.join().unwrap().unwrap();
@@ -441,6 +447,7 @@ fn partial_descriptor_write_does_not_kill_server() {
             tls: None,
             corrupt: false,
             corrupt_byte: None,
+            extra_submits: 0,
         })
     });
 
@@ -453,4 +460,243 @@ fn partial_descriptor_write_does_not_kill_server() {
         panic!("job should accept after the descriptor write completes");
     };
     worker.join().unwrap().unwrap();
+}
+
+
+/// A raw wire client (no daemon): authenticate with its own Ed25519 key
+/// and submit one signed result. Emulates a worker that was never
+/// dispatched trying to vote, outside the assignment-driven flow.
+struct RawClient {
+    stream: std::net::TcpStream,
+    key: ed25519_dalek::SigningKey,
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl RawClient {
+    fn connect(server: &str, worker_id: &str) -> Self {
+        use wire::{ClientToServer, ServerToClient};
+        let mut stream = std::net::TcpStream::connect(server).unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+        wire::send(
+            &mut stream,
+            &ClientToServer::Hello {
+                pubkey_hex: hex(&key.verifying_key().to_bytes()),
+                worker_id: worker_id.into(),
+                listen_port: None,
+            },
+        )
+        .unwrap();
+        loop {
+            match wire::receive::<ServerToClient>(&mut stream).unwrap() {
+                ServerToClient::Nonce { hex: nonce } => {
+                    // The coordinator verifies over the RAW nonce bytes.
+                    let nonce_bytes =
+                        jobfmt::from_hex(&nonce, nonce.len() / 2).unwrap();
+                    let sig = key.sign(&nonce_bytes);
+                    wire::send(
+                        &mut stream,
+                        &ClientToServer::NonceSignature { sig_hex: hex(&sig.to_bytes()) },
+                    )
+                    .unwrap();
+                }
+                ServerToClient::AuthOk { .. } => break,
+                other => panic!("unexpected during auth: {other:?}"),
+            }
+        }
+        RawClient { stream, key }
+    }
+
+    fn submit(&mut self, result: &jobfmt::WorkerResult) {
+        use wire::ClientToServer;
+        wire::send(&mut self.stream, &ClientToServer::JobResult { result: result.clone() })
+            .unwrap();
+    }
+}
+
+fn honest_result(
+    worker_id: &str,
+    job_id: &str,
+    key: &ed25519_dalek::SigningKey,
+) -> jobfmt::WorkerResult {
+    let mut r = jobfmt::WorkerResult {
+        worker_id: worker_id.into(),
+        job_id: job_id.into(),
+        status: "halted".into(),
+        instructions: 524314,
+        result_hash: "67925f935808b41f326dd1f183e8e2951ac8d01f647e0d987f2cefa8944879b5".into(),
+        chunk_hashes: vec![
+            "67925f935808b41f326dd1f183e8e2951ac8d01f647e0d987f2cefa8944879b5".into(),
+        ],
+        output_hex: Some("25a3ab01".into()),
+        trap: None,
+        pubkey_hex: Some(hex(&key.verifying_key().to_bytes())),
+        sig_hex: None,
+    };
+    let sig = key.sign(&jobfmt::signing_message(&r));
+    r.sig_hex = Some(hex(&sig.to_bytes()));
+    r
+}
+
+
+fn net_security_cfg(
+    bind_tx: std::sync::mpsc::Sender<std::net::SocketAddr>,
+    job_tx: std::sync::mpsc::Sender<JobOutcome>,
+    jobs_dir: std::path::PathBuf,
+    store_dir: std::path::PathBuf,
+    pool: usize,
+    round1: Vec<String>,
+) -> net::ServeConfig {
+    net::ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        jobs_dir,
+        store_dir,
+        per_job_deadline: std::time::Duration::from_secs(90),
+        ledger: None,
+        require_identity: true,
+        pool: Some(pool),
+        round1_size: None,
+        round1_ids: Some(round1),
+        tls: None,
+        bound_tx: Some(bind_tx),
+        max_jobs: Some(1),
+        job_tx: Some(job_tx),
+    }
+}
+
+/// SECURITY: a worker the job was never dispatched to cannot vote. Its
+/// result must be dropped before quorum, even when fully authenticated
+/// and correctly signed.
+#[test]
+fn non_dispatched_worker_cannot_vote() {
+    let smoke_elf = std::path::Path::new("../../jobs/demo-hash-smoke/program.elf");
+    if !smoke_elf.exists() {
+        eprintln!("SKIP: build the demo-hash-smoke job first");
+        return;
+    }
+    let root = temp_dir("p2pc-net-nondispatch");
+    let jobs_dir = root.join("jobs");
+    let store_dir = root.join("store");
+    std::fs::create_dir_all(&jobs_dir).unwrap();
+    let store = contentstore::Store::open(&store_dir).unwrap();
+    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
+
+    let (bound_tx, bound_rx) = channel();
+    let (job_tx, job_rx) = channel::<JobOutcome>();
+    let cfg = net_security_cfg(bound_tx, job_tx, jobs_dir.clone(), store_dir, 3, vec![
+        "wA".into(),
+        "wB".into(),
+    ]);
+    std::thread::spawn(move || net::serve(cfg).expect("serve"));
+    let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+    queue_desc(&jobs_dir, "job1", &desc);
+
+    // Dispatch fires once the named round-1 workers authenticate.
+    let identities = root.join("identities");
+    std::fs::create_dir_all(&identities).unwrap();
+    let mut handles = Vec::new();
+    for id in ["wA", "wB"] {
+        let server = bound.to_string();
+        let identity = identities.join(format!("{id}.key"));
+        let store_dir = root.join(format!("worker-store-{id}"));
+        handles.push(std::thread::spawn(move || {
+            run_daemon(&DaemonConfig {
+                server,
+                worker_id: id.into(),
+                identity_path: Some(identity),
+                store_dir,
+                listen_port: None,
+                tls: None,
+                corrupt: false,
+                corrupt_byte: None,
+                extra_submits: 0,
+            })
+        }));
+    }
+    // Give dispatch a beat, then the raw non-dispatched client votes.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let mut client = RawClient::connect(&bound.to_string(), "wC");
+    client.submit(&honest_result("wC", "demo-hash-smoke-0001", &client.key));
+
+    let job1 = wait_job(&job_rx);
+    let coordinator::Decision::Accept { agreed, .. } = &job1.decision else {
+        panic!("job should accept, got {:?}", job1.decision);
+    };
+    assert!(
+        !agreed.contains(&"wC".to_string()),
+        "non-dispatched worker's vote must be dropped, got {agreed:?}"
+    );
+    // agreed follows result arrival order; compare as a set.
+    let mut sorted = agreed.clone();
+    sorted.sort();
+    assert_eq!(sorted, vec!["wA".to_string(), "wB".to_string()]);
+    for h in handles {
+        h.join().unwrap().unwrap();
+    }
+}
+
+/// SECURITY: a dispatched worker's duplicate submissions must not
+/// stuff the quorum. wA submits its honest result TWICE; wB lies.
+/// Counting duplicates, wA's pair would form a 2/3 "majority"; the
+/// correct outcome is a reject for lack of a genuine majority.
+#[test]
+fn duplicate_submissions_do_not_stuff_quorum() {
+    let smoke_elf = std::path::Path::new("../../jobs/demo-hash-smoke/program.elf");
+    if !smoke_elf.exists() {
+        eprintln!("SKIP: build the demo-hash-smoke job first");
+        return;
+    }
+    let root = temp_dir("p2pc-net-dupe");
+    let jobs_dir = root.join("jobs");
+    let store_dir = root.join("store");
+    std::fs::create_dir_all(&jobs_dir).unwrap();
+    let store = contentstore::Store::open(&store_dir).unwrap();
+    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
+
+    let (bound_tx, bound_rx) = channel();
+    let (job_tx, job_rx) = channel::<JobOutcome>();
+    let cfg = net_security_cfg(bound_tx, job_tx, jobs_dir.clone(), store_dir, 2, vec![
+        "wA".into(),
+        "wB".into(),
+    ]);
+    std::thread::spawn(move || net::serve(cfg).expect("serve"));
+    let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+    queue_desc(&jobs_dir, "job1", &desc);
+
+    let identities = root.join("identities");
+    std::fs::create_dir_all(&identities).unwrap();
+    let mut handles = Vec::new();
+    let spawns: Vec<(&str, bool, Option<u8>, u8)> =
+        vec![("wA", false, None, 1), ("wB", true, Some(9), 0)];
+    for (id, corrupt, byte, extra) in spawns {
+        let server = bound.to_string();
+        let identity = identities.join(format!("{id}.key"));
+        let store_dir = root.join(format!("worker-store-{id}"));
+        handles.push(std::thread::spawn(move || {
+            run_daemon(&DaemonConfig {
+                server,
+                worker_id: id.into(),
+                identity_path: Some(identity),
+                store_dir,
+                listen_port: None,
+                tls: None,
+                corrupt,
+                corrupt_byte: byte,
+                extra_submits: extra,
+            })
+        }));
+    }
+
+    let job1 = wait_job(&job_rx);
+    match &job1.decision {
+        coordinator::Decision::Reject { reason } => {
+            assert!(reason.contains("no majority"), "got: {reason}");
+        }
+        other => panic!("duplicates must not manufacture an accept, got {other:?}"),
+    }
+    for h in handles {
+        h.join().unwrap().unwrap();
+    }
 }

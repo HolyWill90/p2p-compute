@@ -158,6 +158,10 @@ pub fn materialize(
     let manifest_bytes = store.get(&ContentId::from_hex(&desc.manifest)?)?;
     let manifest: jobfmt::JobManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|e| format!("materialize: {e}"))?;
+    // The manifest is untrusted wire data: its file fields must be
+    // plain names, or a crafted descriptor could write outside out_dir.
+    jobfmt::confined_name(&manifest.elf)?;
+    jobfmt::confined_name(&manifest.input)?;
     let elf = store.get(&ContentId::from_hex(&desc.elf)?)?;
     let input = store.get(&ContentId::from_hex(&desc.input)?)?;
 

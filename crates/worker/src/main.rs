@@ -122,6 +122,7 @@ fn main() {
                 tls,
                 corrupt: a.corrupt,
                 corrupt_byte: a.corrupt_byte,
+                extra_submits: 0,
             };
             if let Err(e) = worker::daemon::run_daemon(&cfg) {
                 eprintln!("daemon error: {e}");

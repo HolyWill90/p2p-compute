@@ -58,7 +58,14 @@ impl Mem {
         if len != 1 && len != 2 && len != 4 && len != 8 {
             return Err(MemError::OutOfRange);
         }
-        if addr + len as u64 > ADDR_SPACE {
+        // checked_add: `addr` is guest-controlled and can be near
+        // u64::MAX — a wrapping sum could pass this check and address
+        // pages far outside the pinned space (debug would panic).
+        let end = match addr.checked_add(len as u64) {
+            Some(e) => e,
+            None => return Err(MemError::OutOfRange),
+        };
+        if end > ADDR_SPACE {
             return Err(MemError::OutOfRange);
         }
         // Misaligned accesses are supported: the byte loop splits
@@ -79,7 +86,11 @@ impl Mem {
 
     /// Little-endian write of `bytes`. Allocates pages as needed.
     pub fn write(&mut self, addr: u64, bytes: &[u8]) -> Result<(), MemError> {
-        if addr + bytes.len() as u64 > ADDR_SPACE {
+        let end = match addr.checked_add(bytes.len() as u64) {
+            Some(e) => e,
+            None => return Err(MemError::OutOfRange),
+        };
+        if end > ADDR_SPACE {
             return Err(MemError::OutOfRange);
         }
         for (i, &b) in bytes.iter().enumerate() {
@@ -94,7 +105,14 @@ impl Mem {
     }
 
     pub fn read_region(&self, addr: u64, len: usize) -> Result<Vec<u8>, MemError> {
-        if addr + len as u64 > ADDR_SPACE {
+        // checked_add: `addr` is guest-controlled and can be near
+        // u64::MAX — a wrapping sum could pass this check and address
+        // pages far outside the pinned space (debug would panic).
+        let end = match addr.checked_add(len as u64) {
+            Some(e) => e,
+            None => return Err(MemError::OutOfRange),
+        };
+        if end > ADDR_SPACE {
             return Err(MemError::OutOfRange);
         }
         let mut out = Vec::with_capacity(len);
