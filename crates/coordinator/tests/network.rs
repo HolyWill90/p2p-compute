@@ -52,7 +52,9 @@ fn multi_job_session_with_p2p_blob_exchange() {
         per_job_deadline: std::time::Duration::from_secs(90),
         ledger: Some(root.join("ledger.json")),
         require_identity: true,
+        round1_ids: None,
         pool: Some(2),
+        round1_size: None,
         tls: None,
         bound_tx: Some(bound_tx),
         max_jobs: Some(3),
@@ -226,7 +228,9 @@ fn tls_network_session() {
         per_job_deadline: std::time::Duration::from_secs(90),
         ledger: Some(root.join("ledger.json")),
         require_identity: true,
+        round1_ids: None,
         pool: Some(2),
+        round1_size: None,
         tls: None,
         bound_tx: Some(bound_tx),
         max_jobs: Some(1),
@@ -297,4 +301,89 @@ fn tls_network_session() {
         h.join().unwrap().unwrap();
     }
     let _ = cert_der;
+}
+
+/// Reserve escalation over the wire: round 1 is named as two liars
+/// with distinct fabricated results (round1_ids), the honest reserve
+/// is held back, and the coordinator must escalate to it. The honest
+/// result wins and both liars' bonds burn.
+#[test]
+fn reserve_escalation_beats_two_lying_workers() {
+    let demo_elf = std::path::Path::new("../../jobs/demo-hash/program.elf");
+    if !demo_elf.exists() {
+        eprintln!("SKIP: build the demo job first");
+        return;
+    }
+    let root = temp_dir("p2pc-net-reserves");
+    let jobs_dir = root.join("jobs");
+    let store_dir = root.join("store");
+    std::fs::create_dir_all(&jobs_dir).unwrap();
+    let store = contentstore::Store::open(&store_dir).unwrap();
+    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash"), &store).unwrap();
+
+    let (bound_tx, bound_rx) = channel();
+    let (job_tx, job_rx) = channel::<JobOutcome>();
+    let cfg = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        jobs_dir: jobs_dir.clone(),
+        store_dir: store_dir.clone(),
+        per_job_deadline: std::time::Duration::from_secs(90),
+        ledger: Some(root.join("ledger.json")),
+        require_identity: true,
+        pool: Some(3),
+        round1_size: None,
+        round1_ids: Some(vec!["wA".into(), "wB".into()]),
+        tls: None,
+        bound_tx: Some(bound_tx),
+        max_jobs: Some(1),
+        job_tx: Some(job_tx),
+    };
+    std::thread::spawn(move || net::serve(cfg).expect("serve"));
+    let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+
+    std::fs::write(
+        jobs_dir.join("job1.desc.json"),
+        serde_json::to_vec(&desc).unwrap(),
+    )
+    .unwrap();
+
+    let identities = root.join("identities");
+    std::fs::create_dir_all(&identities).unwrap();
+    let mut handles = Vec::new();
+    // wA honest, wB lies with byte 5, wC (reserve) lies with byte 9 —
+    // wait: wC is the RESERVE and must be HONEST for the accept case;
+    // wA honest, wB and the other reserve slots... 3 workers: wA/wB
+    // round 1 (both lying, DISTINCT fabrications), wC honest reserve.
+    let mut spawns: Vec<(&str, bool, Option<u8>)> = Vec::new();
+    spawns.push(("wA", false, None));
+    spawns.push(("wB", true, Some(5)));
+    spawns.push(("wC", false, None));
+    // Round 1 = [wA, wB]: honest + liar → no majority → escalate to wC.
+    for (id, corrupt, byte) in spawns {
+        let server = bound.to_string();
+        let identity = identities.join(format!("{id}.key"));
+        let store_dir = root.join(format!("worker-store-{id}"));
+        handles.push(std::thread::spawn(move || {
+            run_daemon(&DaemonConfig {
+                server,
+                worker_id: id.into(),
+                identity_path: Some(identity),
+                store_dir,
+                listen_port: None,
+                tls: None,
+                corrupt,
+                corrupt_byte: byte,
+            })
+        }));
+    }
+
+    let job1 = wait_job(&job_rx);
+    let coordinator::Decision::Accept { hash, agreed, .. } = &job1.decision else {
+        panic!("escalation should end in accept, got {:?}", job1.decision);
+    };
+    assert_eq!(hash, "297c55c235e4e721cb10bddf7246c85a5ae592a46f889c35dfa896c14cbddba2");
+    assert_eq!(agreed, &vec!["wA".to_string(), "wC".to_string()]);
+    for h in handles {
+        h.join().unwrap().unwrap();
+    }
 }

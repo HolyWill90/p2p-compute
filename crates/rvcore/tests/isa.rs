@@ -442,3 +442,47 @@ fn compressed_sub_uses_rs1_prime_destination() {
     assert_eq!(cpu.get(14), 7);
     assert_eq!(cpu.get(15), 3);
 }
+
+#[test]
+fn division_by_zero_unsigned_exact_spec() {
+    // Regression (external audit): DIVU by zero returns ALL BITS SET,
+    // not the dividend; DIVUW by zero returns sext32(0xFFFFFFFF).
+    // REMU by zero returns the (64-bit) dividend; REMUW by zero the
+    // sign-extended 32-bit dividend.
+    let (cpu, _) = exec(
+        &[
+            u_type(0x12345, 5, 0b0110111),        // x5 = 0x12345000
+            i_type(0x678, 5, 0, 5, OPIMM),        // x5 = 0x12345678
+            r_type(1, 0, 5, 5, 9, OP),            // divu  x9,  x5, x0 → u64::MAX
+            r_type(1, 0, 5, 7, 10, OP),           // remu  x10, x5, x0 → x5
+            r_type(1, 0, 5, 4, 11, OP32),         // divuw x11, x5, x0 → u64::MAX
+            r_type(1, 0, 5, 7, 12, OP32),         // remuw x12, x5, x0 → sext32(0x12345678)
+            ebreak(),
+        ],
+        |_| {},
+    );
+    assert_eq!(cpu.get(9), u64::MAX);
+    assert_eq!(cpu.get(10), 0x12345678);
+    assert_eq!(cpu.get(11), u64::MAX);
+    assert_eq!(cpu.get(12), 0x12345678u32 as i32 as i64 as u64);
+}
+
+#[test]
+fn compressed_subw_addw() {
+    // Regression (external audit): bit12 selects C.SUBW/C.ADDW inside
+    // the Q1 f3=100 group; it was ignored, decoding C.SUBW as C.SUB.
+    // c.li a2, 5 → 0x4615 ; c.li a3, 3 → 0x468D
+    // c.subw a2, a3 → funct4=100111, rd'=4(x12), [6:5]=00, rs2'=5 → 0x9E15 → 2
+    let (cpu, _) = exec_c(&[0x4615, 0x468D, 0x9E15], |_| {});
+    assert_eq!(cpu.get(13), 3);
+    assert_eq!(cpu.get(12) as i32, 2, "c.subw: 5 - 3");
+}
+
+#[test]
+fn compressed_addw_distinct_from_xor() {
+    // C.ADDW (bit12=1, [6:5]=01) must not decode as C.XOR:
+    // 5 + 3 = 8 but 5 ^ 3 = 6 — the two must disagree.
+    // c.li a2, 5 ; c.li a3, 3 ; c.addw a2, a3 → funct4=100111, [6:5]=01 → 0x9E35
+    let (cpu, _) = exec_c(&[0x4615, 0x468D, 0x9E35], |_| {});
+    assert_eq!(cpu.get(12), 8, "C.ADDW must add (C.XOR would give 6)");
+}

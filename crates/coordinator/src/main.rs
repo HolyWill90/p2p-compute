@@ -155,6 +155,15 @@ struct ServeArgs {
     /// Stop after this many jobs (default: run until killed).
     #[arg(long)]
     max_jobs: Option<usize>,
+    /// Round-1 sample size for untargeted jobs: pick this many
+    /// workers at random, hold the rest as escalation reserves.
+    /// Default: all authenticated workers.
+    #[arg(long)]
+    sample_size: Option<usize>,
+    /// Deterministic round-1 membership by worker id (comma-separated),
+    /// overriding --sample-size.
+    #[arg(long)]
+    round1_ids: Option<String>,
     #[arg(long)]
     store: PathBuf,
     #[arg(long)]
@@ -198,6 +207,10 @@ fn cmd_serve(args: ServeArgs) {
         ledger: args.ledger,
         require_identity: true,
         pool: Some(args.pool),
+        round1_size: args.sample_size,
+        round1_ids: args
+            .round1_ids
+            .map(|s| s.split(',').map(|x| x.trim().to_string()).collect()),
         tls: args_tls,
         bound_tx: None,
         max_jobs: args.max_jobs,

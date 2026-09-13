@@ -40,6 +40,13 @@ pub struct ServeConfig {
     /// When set, worker connections run over TLS with this server
     /// certificate + key (DER).
     pub tls: Option<(Vec<u8>, Vec<u8>)>,
+    /// Random-sampling size for round-1 dispatch of untargeted jobs:
+    /// pick this many workers at random, hold the rest as escalation
+    /// reserves. None = dispatch to every authenticated worker.
+    pub round1_size: Option<usize>,
+    /// Deterministic round-1 membership by worker id (overrides
+    /// random sampling; used by tests and operator-targeted runs).
+    pub round1_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +93,10 @@ struct PendingJob {
     targets: Option<Vec<String>>,
     path: PathBuf,
     dispatched: bool,
+    escalated: bool,
     dispatched_ids: Vec<String>,
+    /// Workers held back from round 1 for escalation.
+    reserves: Vec<String>,
     results: Vec<WorkerResult>,
     started: Instant,
 }
@@ -202,7 +212,9 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                     targets,
                     path,
                     dispatched: false,
+                    escalated: false,
                     dispatched_ids: Vec::new(),
+                    reserves: Vec::new(),
                     results: Vec::new(),
                     started: Instant::now(),
                 });
@@ -214,20 +226,24 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
         if let Some(job) = &mut pending {
             if !job.dispatched {
                 let map = conns.lock().unwrap();
-                let targets_ready = match &job.targets {
-                    Some(ids) => ids.iter().all(|id| {
+                let named = cfg.round1_ids.as_ref();
+                let targets_ready = match (&job.targets, named) {
+                    (Some(ids), _) => ids.iter().all(|id| {
                         map.values().any(|c| c.authed && &c.worker_id == id)
                     }),
-                    None => map
+                    (_, Some(ids)) => ids.iter().all(|id| {
+                        map.values().any(|c| c.authed && &c.worker_id == id)
+                    }),
+                    (None, None) => map
                         .values()
                         .filter(|c| c.authed)
                         .count()
                         >= cfg.pool.unwrap_or(1),
                 };
                 if targets_ready {
-                    // Pass 1 (immutable): collect assignees and their
-                    // peer hints. Pass 2 (mutable): send.
-                    let mut assignments: Vec<(String, Vec<String>)> = Vec::new();
+                    // Pass 1 (immutable): collect eligible workers and
+                    // their peer hints.
+                    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
                     for c in map.values() {
                         let eligible = match &job.targets {
                             Some(ids) => ids.contains(&c.worker_id),
@@ -243,12 +259,60 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                                 })
                                 .filter_map(|p| p.peer_addr.clone())
                                 .collect();
-                            assignments.push((c.worker_id.clone(), hints));
+                            candidates.push((c.worker_id.clone(), hints));
                         }
                     }
                     drop(map);
+                    // Random sampling: when more workers are eligible
+                    // than the job needs, pick the round-1 set at
+                    // random and hold the rest as escalation reserves.
+                    // "First N authed workers" is gameable — connect
+                    // first, get picked.
+                    let named = cfg.round1_ids.as_ref().filter(|_| job.targets.is_none());
+                    let selected: Vec<(String, Vec<String>)> = match named {
+                        Some(ids) => {
+                            // Named round-1 membership (deterministic).
+                            ids.iter()
+                                .filter_map(|id| {
+                                    candidates
+                                        .iter()
+                                        .find(|(wid, _)| wid == id)
+                                        .cloned()
+                                })
+                                .collect()
+                        }
+                        None => match cfg.round1_size {
+                            Some(n) if candidates.len() > n => {
+                                let mut shuffled = candidates.clone();
+                                shuffle(&mut shuffled);
+                                shuffled.truncate(n);
+                                shuffled
+                            }
+                            _ => candidates.clone(),
+                        },
+                    };
+                    // Reserves = authenticated workers outside the
+                    // round-1 set (including workers the job was NOT
+                    // targeted at — they are exactly who escalation
+                    // needs when round 1 deadlocks). The lock is
+                    // already dropped here; re-acquire to read.
+                    let reserves: Vec<String> = {
+                        let map = conns.lock().unwrap();
+                        let selected_ids: Vec<&str> =
+                            selected.iter().map(|(id, _)| id.as_str()).collect();
+                        let targeted = job.targets.as_ref();
+                        map.values()
+                            .filter(|c| {
+                                c.authed
+                                    && !selected_ids.contains(&c.worker_id.as_str())
+                                    && targeted
+                                        .map_or(true, |ids| !ids.contains(&c.worker_id))
+                            })
+                            .map(|c| c.worker_id.clone())
+                            .collect()
+                    };
                     let mut map = conns.lock().unwrap();
-                    for (wid, hints) in &assignments {
+                    for (wid, hints) in &selected {
                         if let Some(c) = map.values_mut().find(|c| c.worker_id == *wid) {
                             let _ = c.outbound.send(ServerToClient::JobAssignment {
                                 descriptor: job.descriptor.clone(),
@@ -257,7 +321,13 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                             job.dispatched_ids.push(wid.clone());
                         }
                     }
+                    job.reserves = reserves;
+                    drop(map);
                     job.dispatched = true;
+                    // The execution window starts here, not at queue
+                    // time: the queue wait includes operator/handshake
+                    // latency that must not eat the deadline.
+                    job.started = Instant::now();
                     println!(
                         "job {} dispatched to [{}]",
                         job.descriptor.job_id,
@@ -267,20 +337,72 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
             }
         }
 
-        // Per-job deadline and completion.
+        // Per-job completion: all dispatched workers have results, the
+        // deadline passed, or an escalation round is still owed.
         let mut job_finished: Option<PendingJob> = None;
         if let Some(job) = &mut pending {
             if job.dispatched {
                 let all_in = job.dispatched_ids.iter().all(|id| {
                     job.results.iter().any(|r| &r.worker_id == id)
                 });
-                if all_in || job.started.elapsed() > cfg.per_job_deadline {
+                if all_in {
+                    // No majority and reserves remain → escalate to
+                    // them (dispatch the held-back workers) instead of
+                    // finishing.
+                    if matches!(decide(&job.results), Decision::Escalate)
+                        && !job.reserves.is_empty()
+                    {
+                        let reserves = std::mem::take(&mut job.reserves);
+                        let mut map = conns.lock().unwrap();
+                        for wid in &reserves {
+                            // Hints first (immutable), then dispatch.
+                            let hints: Vec<String> = map
+                                .values()
+                                .filter(|p| {
+                                    p.authed
+                                        && p.peer_addr.is_some()
+                                        && &p.worker_id != wid
+                                })
+                                .filter_map(|p| p.peer_addr.clone())
+                                .collect();
+                            if let Some(c) =
+                                map.values_mut().find(|c| &c.worker_id == wid && c.authed)
+                            {
+                                let sent = c.outbound.send(ServerToClient::JobAssignment {
+                                    descriptor: job.descriptor.clone(),
+                                    peer_hints: hints,
+                                });
+                                eprintln!("escalation dispatch to {wid}: sent={}", sent.is_ok());
+                                job.dispatched_ids.push(wid.clone());
+                            }
+                        }
+                        job.escalated = true;
+                        println!(
+                            "no majority in round 1 — escalating to [{}]",
+                            reserves.join(", ")
+                        );
+                        continue; // job stays pending for the escalation round
+                    }
                     job_finished = Some(PendingJob {
                         descriptor: job.descriptor.clone(),
                         targets: job.targets.clone(),
                         path: job.path.clone(),
                         dispatched: true,
+                        escalated: false,
                         dispatched_ids: job.dispatched_ids.clone(),
+                        reserves: Vec::new(),
+                        results: std::mem::take(&mut job.results),
+                        started: job.started,
+                    });
+                } else if job.started.elapsed() > cfg.per_job_deadline {
+                    job_finished = Some(PendingJob {
+                        descriptor: job.descriptor.clone(),
+                        targets: job.targets.clone(),
+                        path: job.path.clone(),
+                        dispatched: true,
+                        escalated: false,
+                        dispatched_ids: job.dispatched_ids.clone(),
+                        reserves: Vec::new(),
                         results: std::mem::take(&mut job.results),
                         started: job.started,
                     });
@@ -354,6 +476,19 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                     c.authed = true;
                     let wid = c.worker_id.clone();
                     let _ = c.outbound.send(ServerToClient::AuthOk { worker_id: wid.clone() });
+                    // A worker authenticating after dispatch joins the
+                    // in-flight job's reserve list (untargeted jobs,
+                    // before escalation) — otherwise late joiners can
+                    // never participate and escalation deadlocks.
+                    if let Some(job) = &mut pending {
+                        if job.dispatched
+                            && !job.escalated
+                            && job.targets.is_none()
+                            && !job.dispatched_ids.contains(&wid)
+                        {
+                            job.reserves.push(wid.clone());
+                        }
+                    }
                     println!(
                         "worker authenticated: {wid}{} (pool {}/{})",
                         c.peer_addr.as_ref().map(|_| " [p2p]").unwrap_or(""),
@@ -388,18 +523,51 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                 }
             }
             Event::Result { conn, result } => {
-                let map = conns.lock().unwrap();
-                let has_identity = map.get(&conn).map(|c| c.pubkey.is_some()).unwrap_or(false);
-                drop(map);
-                let mut result = result;
-                if has_identity {
-                    if let Err(e) = verify_signature(&result) {
-                        println!("SIGNATURE FAILURE from conn {conn}: {e}");
-                        result.status = "malformed".into();
-                    }
+                // SECURITY: a result is only counted if it arrives on an
+                // authenticated connection, under that connection's own
+                // worker id and Ed25519 key, with a valid signature over
+                // the result hash. Anything else is impersonation and is
+                // dropped before it can touch quorum.
+                let mut map = conns.lock().unwrap();
+                let Some(c) = map.get_mut(&conn) else {
+                    eprintln!("SECURITY: result from unknown conn {conn} dropped");
+                    continue;
+                };
+                if !c.authed {
+                    eprintln!("SECURITY: result from unauthenticated conn {conn} dropped");
+                    continue;
                 }
+                if result.worker_id != c.worker_id {
+                    eprintln!(
+                        "SECURITY: worker id mismatch on conn {conn}: claimed {}, authenticated as {}",
+                        result.worker_id, c.worker_id
+                    );
+                    continue;
+                }
+                match (&c.pubkey, &result.pubkey_hex) {
+                    (Some(pk), Some(claimed)) if pk != claimed => {
+                        eprintln!(
+                            "SECURITY: key mismatch on conn {conn} ({wid}): result claims {claimed}",
+                            wid = c.worker_id,
+                        );
+                        continue;
+                    }
+                    (None, _) if cfg.require_identity => {
+                        eprintln!("SECURITY: unsigned result on conn {conn} dropped");
+                        continue;
+                    }
+                    _ => {}
+                }
+                if let Err(e) = verify_signature(&result) {
+                    eprintln!("SECURITY: bad signature on conn {conn}: {e}");
+                    continue;
+                }
+                let wid = c.worker_id.clone();
+                drop(map);
+
                 if let Some(job) = &mut pending {
                     if result.job_id == job.descriptor.job_id {
+                        println!("result accepted: {wid} → {}", &result.result_hash[..12]);
                         job.results.push(result);
                     }
                 }
@@ -488,6 +656,18 @@ fn verify_nonce(pubkey_hex: &str, nonce_hex: &[u8], sig_hex: &str) -> Result<(),
     pk.verify(nonce_hex, &sig).map_err(|e| format!("{e}"))
 }
 
+/// Fisher-Yates shuffle driven by the OS CSPRNG — unbiased round-1
+/// worker selection. "First N authed workers" is gameable: connect
+/// first, get picked.
+fn shuffle<T>(items: &mut [T]) {
+    use rand_core::RngCore;
+    let mut rng = rand_core::OsRng;
+    for i in (1..items.len()).rev() {
+        let j = (rng.next_u64() as usize) % (i + 1);
+        items.swap(i, j);
+    }
+}
+
 fn rand_nonce() -> [u8; 32] {
     use rand_core::RngCore;
     let mut n = [0u8; 32];
@@ -535,12 +715,17 @@ fn session_loop(
             }
             Ok(None) => {
                 // Idle window: push anything the main loop queued.
+                let mut pumped = 0usize;
                 while let Ok(msg) = outbound_rx.try_recv() {
                     if wire::send(&mut stream, &msg).is_err() {
                         conns.lock().unwrap().remove(&conn);
                         tx.send(Event::Closed { conn }).ok();
                         return;
                     }
+                    pumped += 1;
+                }
+                if pumped > 0 {
+                    eprintln!("conn {conn}: pumped {pumped} queued messages");
                 }
             }
             Err(e) => {

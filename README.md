@@ -14,7 +14,7 @@ Every verification mechanism consumes that chunk-hash chain:
 |---|---|---|---|
 | Budget | Quorum N=3 → 5, bond slashing | ~3× | implemented |
 | Standard | Optimistic acceptance + dispute game (one-chunk judge) | ~1× | implemented |
-| Strong | SP1 zkVM proof — same ELF, same ISA | 1× + prover tax | verified (three-way: emulator == zkVM == host) |
+| Strong | SP1 zkVM proof — same algorithm, guest compiled for SP1's RISC-V | 1× + prover tax | receipt verified (three-way digest match on a 4 KiB input; full same-ELF proving not yet automated) |
 
 See `docs/DESIGN.md` for the decision log and `docs/PILOT.md` for the
 product direction.
@@ -84,6 +84,7 @@ target/release/worker.exe run target/materialized --id from-store   # identical 
 target/release/coordinator.exe verify --store target/store
 
 # 13. zk tier (needs the SP1 toolchain, ~2 GB one-time download)
+#     verifies the same ALGORITHM as a zkVM guest — not yet the same ELF binary
 scripts/sp1-validate.sh
 
 # 14. TLS: serve --tls generates a self-signed coordinator cert on first run;

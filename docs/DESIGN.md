@@ -102,11 +102,12 @@ later, independent of verification correctness.
 - Agent-task pilot job (`jobs/agent-task`): deterministic agent-shaped
   batch transform, verified against an independent reference. Positioning
   in `docs/PILOT.md`.
-- **zk tier proven end-to-end (SP1 v6.8)**: the demo algorithm compiled as
-  an SP1 guest, executed inside the zkVM, proved on CPU, receipt verified
-  — and the zkVM digest equals the emulator digest for the same input
-  (three-way match: emulator == zkVM == host reference). The pinned-ISA
-  strategy is no longer a claim; it is a demonstrated property.
+- **zk tier demonstrated (SP1 v6.8)**: the demo algorithm compiled as an
+  SP1 guest, executed inside the zkVM, proved on CPU, receipt verified —
+  and the zkVM digest equals the host reference for the same input. Scope
+  note: this validates the ALGORITHM as a zk guest, not yet the exact
+  emulator ELF binary; full same-ELF proving is future work, and SP1 is
+  not yet wired into CI (the toolchain download is ~2 GB).
 
 ## Content-addressed store (the torrent layer, seeded)
 
@@ -135,6 +136,24 @@ Stated as tests (`crates/coordinator/tests/collusion.rs`), not prose claims:
   job fails closed (Reject) — never an unbounded loop. Slashing makes the
   attacker's ledger strictly worse (-100/job): 3 attacked jobs → -300,
   client cost bounded at 15 executions.
+- **Security hardening (post-audit)**: submitted results are bound to
+  the authenticated connection — worker id, Ed25519 public key, and a
+  signature over the result hash are all checked server-side before a
+  result can touch quorum. Round-1 worker selection is randomized
+  (Fisher-Yates over the OS CSPRNG) with held-back escalation reserves,
+  and late-authenticating workers join the reserve list of an in-flight
+  untargeted job (escalation can no longer deadlock when a reserve
+  connects after dispatch).
+- **ISA conformance regressions (external audit)**: four M-extension and
+  compressed-decode bugs found and fixed — DIVU/DIVUW by zero returned
+  the dividend instead of all-ones, REMUW/REMW by zero returned the full
+  register instead of the sign-extended 32-bit dividend, and the Q1
+  f3=100 group ignored bit12, decoding C.SUBW/C.ADDW as C.SUB/C.XOR.
+  Each has a dedicated regression test; the official riscv-arch-test
+  suite remains the exhaustive form.
+- **Honest scope notes**: bond "slashing" is JSON ledger bookkeeping, not
+  on-chain escrow; random sampling is unbiased but the reserve pool is
+  only as Sybil-resistant as worker identities (keypairs, not stake).
 - **Benchmarks** (24-core x86-64 host, release build, single-threaded
   interpreter): 22M instructions/sec; 33.5M-instruction job in 1.53s;
   snapshots cost 2.11 MB per chunk (69.6 MB for the 2 MiB-input demo —

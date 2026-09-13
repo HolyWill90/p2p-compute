@@ -24,16 +24,16 @@ jobs:
         with:
           targets: riscv64imac-unknown-none-elf
 
-      - name: Unit tests (ISA + quorum logic)
-        run: cargo test --workspace
-
-      - name: Build demo job (RISC-V ELF)
-        working-directory: jobs/demo-hash/job
-        run: cargo build --release
-
-      - name: Install job ELF into job directory
+      - name: Build job ELFs (RISC-V)
         shell: bash
-        run: cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash/program.elf
+        run: |
+          (cd jobs/demo-hash/job && cargo build --release)
+          (cd jobs/agent-task/job && cargo build --release)
+          cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash/program.elf
+          cp jobs/agent-task/job/target/riscv64imac-unknown-none-elf/release/agent-task jobs/agent-task/program.elf
+
+      - name: Unit tests (ISA + quorum + network integration)
+        run: cargo test --workspace
 
       - name: Differential determinism (debug vs release on this OS)
         run: cargo run --release -p difftest -- jobs/demo-hash

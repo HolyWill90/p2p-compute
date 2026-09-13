@@ -241,7 +241,7 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool) -> Result<bool, T
                     None if b == 0 => u64::MAX,
                     None => i64::MIN as u64, // MIN / -1
                 },
-                (0b0000001, 0b101) => if b == 0 { a } else { a / b },
+                (0b0000001, 0b101) => if b == 0 { u64::MAX } else { a / b },
                 (0b0000001, 0b110) => match (a as i64).checked_rem(b as i64) {
                     Some(r) => r as u64,
                     None if b == 0 => a,           // rem by zero: dividend
@@ -267,13 +267,19 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool) -> Result<bool, T
                     None if b == 0 => u64::MAX, // -1 sign-extended
                     None => i32::MIN as i64 as u64,
                 },
-                (0b0000001, 0b101) => if b == 0 { a } else { ((a as u32) / (b as u32)) as i32 as u64 },
+                (0b0000001, 0b101) => if b == 0 { u64::MAX } else { ((a as u32) / (b as u32)) as i32 as u64 },
                 (0b0000001, 0b110) => match (a as i32).checked_rem(b as i32) {
                     Some(r) => r as i64 as u64,
-                    None if b == 0 => a, // dividend, already sign-extended form
+                    None if b == 0 => (a as i32) as i64 as u64, // sext32(dividend)
                     None => 0,
                 },
-                (0b0000001, 0b111) => if b == 0 { a } else { ((a as u32) % (b as u32)) as i32 as u64 },
+                (0b0000001, 0b111) => {
+                    if b == 0 {
+                        (a as u32) as i32 as u64 // sext32(dividend)
+                    } else {
+                        ((a as u32) % (b as u32)) as i32 as u64
+                    }
+                }
                 _ => return Err(illegal(pc, inst)),
             };
             cpu.set(rd, val);
@@ -464,16 +470,25 @@ fn step_c(cpu: &mut Cpu, mem: &mut Mem, pc: u64, hw: u16) -> Result<bool, Trap> 
                             cpu.set(dest, (cpu.get(dest) & imm6) as u64);
                         }
                         _ => {
-                            // c.sub/c.xor/c.or/c.and on rs2'
+                            // bit12=0: c.sub/c.xor/c.or/c.and;
+                            // bit12=1 (RV64C): c.subw/c.addw, 10/11 reserved.
                             let b = cpu.get(rs2_c);
                             let a = cpu.get(dest);
-                            let v = match (hw >> 5) & 0b11 {
-                                0b00 => a.wrapping_sub(b),
-                                0b01 => a ^ b,
-                                0b10 => a | b,
-                                _ => a & b,
-                            };
-                            cpu.set(dest, v);
+                            if (hw >> 12) & 0x1 == 0 {
+                                let v = match (hw >> 5) & 0b11 {
+                                    0b00 => a.wrapping_sub(b),
+                                    0b01 => a ^ b,
+                                    0b10 => a | b,
+                                    _ => a & b,
+                                };
+                                cpu.set(dest, v);
+                            } else {
+                                match (hw >> 5) & 0b11 {
+                                    0b00 => cpu.set(dest, ((a as u32).wrapping_sub(b as u32)) as i32 as u64),
+                                    0b01 => cpu.set(dest, ((a as u32).wrapping_add(b as u32)) as i32 as u64),
+                                    _ => return Err(bad()),
+                                }
+                            }
                         }
                     }
                     cpu.pc = next_pc;
@@ -786,8 +801,16 @@ pub fn run(mem: &mut Mem, entry: u64, input: &[u8], cfg: &Config) -> RunOutcome 
     let mut n: u64 = 0;
     let mut in_chunk: u64 = 0;
     let mut status = ExitStatus::InstructionLimit;
+    // Progress telemetry for hung-run diagnosis (off unless requested).
+    let progress_every: u64 = std::env::var("RVCORE_PROGRESS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     loop {
+        if progress_every > 0 && n % progress_every == 0 && n > 0 {
+            eprintln!("[rvcore] pc {:#x} inst {}", cpu.pc, n);
+        }
         if n >= cfg.max_instructions {
             push_hash(&mut prev, &cpu, mem, &mut chain);
             break;

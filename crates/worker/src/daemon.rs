@@ -170,6 +170,12 @@ fn fetch_blob(
             Ok(())
         }
         ServerToClient::Blob { hex: None } => Err(format!("blob {id_hex} not found on coordinator")),
+        ServerToClient::BetweenJobs => {
+            // The coordinator cancelled this job while we were
+            // fetching (e.g. it expired). The session stays up; the
+            // reconnect loop re-joins the pool for the next job.
+            Err("__cancelled__".into())
+        }
         other => Err(format!("expected Blob, got {other:?}")),
     }
 }
@@ -192,7 +198,13 @@ pub fn run_daemon(cfg: &DaemonConfig) -> Result<DaemonStats, String> {
     let mut backoff = std::time::Duration::from_secs(1);
     loop {
         eprintln!("[{}] session: connecting attempt", cfg.worker_id);
-        let (end, stats) = session_once(cfg, &counters)?;
+        let (end, stats) = match session_once(cfg, &counters) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[{}] session failed: {e}", cfg.worker_id);
+                return Err(e);
+            }
+        };
         eprintln!(
             "[{}] session ended: {:?} (jobs so far: {})",
             cfg.worker_id,
@@ -233,19 +245,29 @@ fn session_once(
 ) -> Result<(SessionEnd, DaemonStats), String> {
 
     // Optional peer blob server: bound before Hello so the real port
-    // can be reported to the coordinator.
+    // can be reported to the coordinator. A bind failure (port still
+    // held by a dying previous session, for example) DEGRADES the
+    // worker to fetch-only — it must never kill the daemon.
     let mut listen_port = cfg.listen_port;
     let peer_server = match cfg.listen_port {
-        Some(port) => {
-            let listener =
-                TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("peer listen: {e}"))?;
-            let actual = listener.local_addr().map_err(|e| e.to_string())?.port();
-            listen_port = Some(actual);
-            let store =
-                Arc::new(contentstore::Store::open(&cfg.store_dir).map_err(|e| e.to_string())?);
-            spawn_peer_server(listener, store, counters.clone());
-            Some(actual)
-        }
+        Some(port) => match TcpListener::bind(("0.0.0.0", port)) {
+            Ok(listener) => {
+                let actual = listener.local_addr().map_err(|e| e.to_string())?.port();
+                listen_port = Some(actual);
+                let store = Arc::new(
+                    contentstore::Store::open(&cfg.store_dir).map_err(|e| e.to_string())?,
+                );
+                spawn_peer_server(listener, store, counters.clone());
+                Some(actual)
+            }
+            Err(e) => {
+                eprintln!(
+                    "[{}] peer blob server unavailable ({e}) — fetch-only this session",
+                    cfg.worker_id
+                );
+                None
+            }
+        },
         None => None,
     };
 
@@ -355,6 +377,13 @@ fn session_once(
 
                 for id in [&descriptor.manifest, &descriptor.elf, &descriptor.input] {
                     if let Err(e) = fetch_blob(&mut stream, id, &peer_hints, &store, counters) {
+                        if e == "__cancelled__" {
+                            println!(
+                                "[{}] job {} cancelled by coordinator — waiting for the next one",
+                                cfg.worker_id, descriptor.job_id
+                            );
+                            return Ok((SessionEnd::ConnectionLost, stats_snapshot(counters)));
+                        }
                         eprintln!("[{}] blob fetch failed: {e} — connection lost", cfg.worker_id);
                         return Ok((SessionEnd::ConnectionLost, stats_snapshot(counters)));
                     }
@@ -370,12 +399,17 @@ fn session_once(
                 std::fs::remove_dir_all(&job_dir).ok();
                 contentstore::materialize(&descriptor, &store, &job_dir)
                     .map_err(|e| format!("materialize: {e}"))?;
+                eprintln!("[{}] materialized job into {}", cfg.worker_id, job_dir.display());
                 let job = jobfmt::load_dir(&job_dir).map_err(|e| format!("load: {e}"))?;
 
                 // Execute in the pinned deterministic emulator.
                 let image = rvcore::elf::parse(&job.elf).map_err(|e| format!("elf: {e}"))?;
                 let mut mem = rvcore::Mem::new();
                 rvcore::elf::load(&mut mem, &image).map_err(|e| format!("elf: {e}"))?;
+                eprintln!(
+                    "[{}] executing {} ({} bytes input, chunk {})",
+                    cfg.worker_id, job.manifest.name, job.input.len(), job.manifest.chunk_size
+                );
                 let outcome = rvcore::interp::run(
                     &mut mem,
                     image.entry,
@@ -385,6 +419,16 @@ fn session_once(
                         max_instructions: job.manifest.max_instructions,
                         ..Default::default()
                     },
+                );
+                eprintln!(
+                    "[{}] executed: {} after {} instructions",
+                    cfg.worker_id,
+                    match &outcome.status {
+                        rvcore::ExitStatus::Halted => "halted".to_string(),
+                        rvcore::ExitStatus::InstructionLimit => "limit".to_string(),
+                        rvcore::ExitStatus::Trapped(t) => format!("trap {t:?}"),
+                    },
+                    outcome.instructions
                 );
 
                 let status = match &outcome.status {
