@@ -1,0 +1,4 @@
+[env]
+# The network integration tests spawn real coordinators + daemons;
+# running them concurrently starves the per-job deadlines under load.
+RUST_TEST_THREADS = "1"
