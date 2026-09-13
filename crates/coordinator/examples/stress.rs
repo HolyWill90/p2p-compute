@@ -50,11 +50,9 @@ fn main() {
 
     // Queue all jobs up front.
     for i in 0..jobs {
-        std::fs::write(
-            jobs_dir.join(format!("job{i}.desc.json")),
-            serde_json::to_vec(&desc).unwrap(),
-        )
-        .unwrap();
+        let tmp = jobs_dir.join(format!("job{i}.queueing"));
+        std::fs::write(&tmp, serde_json::to_vec(&desc).unwrap()).unwrap();
+        std::fs::rename(&tmp, jobs_dir.join(format!("job{i}.desc.json"))).unwrap();
     }
 
     // Two reconnecting daemons.

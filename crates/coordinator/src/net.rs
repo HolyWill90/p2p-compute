@@ -187,6 +187,8 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
     let mut outcomes: Vec<JobOutcome> = Vec::new();
     let mut pending: Option<PendingJob> = None;
     let mut jobs_done = 0usize;
+    // Descriptors seen failing to parse, for the write-grace window.
+    let mut scan_errors: HashMap<PathBuf, Instant> = HashMap::new();
 
     loop {
         if let Some(max) = cfg.max_jobs {
@@ -198,7 +200,9 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
 
         // New job descriptors from the watched directory.
         if pending.is_none() {
-            if let Some((descriptor, targets, path)) = scan_jobs_dir(&cfg.jobs_dir)? {
+            if let Some((descriptor, targets, path)) =
+                scan_jobs_dir(&cfg.jobs_dir, &mut scan_errors)?
+            {
                 println!(
                     "job queued: {} (target: {})",
                     descriptor.job_id,
@@ -608,17 +612,49 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
 /// A queued job file: descriptor, optional explicit round-1 targets, path.
 type QueuedJob = (contentstore::JobDescriptor, Option<Vec<String>>, PathBuf);
 
+/// A descriptor still being written by its client surfaces as a
+/// short-lived read or parse error. Such a file is skipped until it
+/// has been failing this long — only then is it fatal, so a genuinely
+/// corrupt descriptor still halts the server for operator recovery.
+const DESC_WRITE_GRACE: Duration = Duration::from_secs(5);
+
 /// Returns (descriptor, targets, path) and marks the file in use by
 /// renaming to `.dispatching` — crash-safe: a renamed file is
 /// recovered by the operator, not silently re-run.
-fn scan_jobs_dir(jobs_dir: &std::path::Path) -> Result<Option<QueuedJob>, String> {
+fn scan_jobs_dir(
+    jobs_dir: &std::path::Path,
+    errors: &mut HashMap<PathBuf, Instant>,
+) -> Result<Option<QueuedJob>, String> {
     for entry in std::fs::read_dir(jobs_dir).map_err(|e| format!("jobs dir: {e}"))?.flatten() {
         let path = entry.path();
         let name = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
         if name.ends_with(".desc.json") {
-            let bytes = std::fs::read(&path).map_err(|e| format!("jobs dir: {e}"))?;
-            let descriptor: contentstore::JobDescriptor =
-                serde_json::from_slice(&bytes).map_err(|e| format!("descriptor {name}: {e}"))?;
+            let loaded = std::fs::read(&path)
+                .map_err(|e| format!("jobs dir: {e}"))
+                .and_then(|bytes| {
+                    serde_json::from_slice::<contentstore::JobDescriptor>(&bytes)
+                        .map_err(|e| format!("descriptor {name}: {e}"))
+                });
+            let descriptor = match loaded {
+                Ok(d) => d,
+                Err(e) => {
+                    match errors.entry(path.clone()) {
+                        std::collections::hash_map::Entry::Occupied(seen) => {
+                            if seen.get().elapsed() >= DESC_WRITE_GRACE {
+                                return Err(e);
+                            }
+                        }
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert(Instant::now());
+                            eprintln!(
+                                "descriptor {name} unreadable ({e}) — retrying for up to {DESC_WRITE_GRACE:?}"
+                            );
+                        }
+                    }
+                    continue; // likely mid-write; retry next poll
+                }
+            };
+            errors.remove(&path);
             let stem = name.trim_end_matches(".desc.json");
             let targets: Option<Vec<String>> = stem.split_once('@').map(|(_, ids)| {
                 ids.split(',').map(|x| x.trim().to_string()).collect()

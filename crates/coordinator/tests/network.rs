@@ -9,7 +9,7 @@
 //!          wC's from-server counter stays zero.
 
 use coordinator::net::{self, JobOutcome, ServeConfig};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use worker::daemon::{run_daemon, DaemonConfig};
 
@@ -18,6 +18,15 @@ fn temp_dir(name: &str) -> PathBuf {
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// Queue a descriptor atomically: the coordinator polls the watched
+/// directory continuously, and a plain write truncates the file first
+/// — the poll could read an empty or partial descriptor mid-write.
+fn queue_desc(jobs_dir: &Path, name: &str, desc: &contentstore::JobDescriptor) {
+    let tmp = jobs_dir.join(format!("{name}.queueing"));
+    std::fs::write(&tmp, serde_json::to_vec(desc).unwrap()).unwrap();
+    std::fs::rename(&tmp, jobs_dir.join(format!("{name}.desc.json"))).unwrap();
 }
 
 fn wait_job(rx: &std::sync::mpsc::Receiver<JobOutcome>) -> JobOutcome {
@@ -72,11 +81,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
     println!("coordinator bound at {bound}");
 
     // Job 1 queued before any worker connects.
-    std::fs::write(
-        jobs_dir.join("job1.desc.json"),
-        serde_json::to_vec(&desc1).unwrap(),
-    )
-    .unwrap();
+    queue_desc(&jobs_dir, "job1", &desc1);
 
     let identities = root.join("identities");
     std::fs::create_dir_all(&identities).unwrap();
@@ -130,11 +135,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
     assert_eq!(agreed.len(), 2);
 
     // --- job 2: agent-task, same session, new blobs from the coordinator ---
-    std::fs::write(
-        jobs_dir.join("job2.desc.json"),
-        serde_json::to_vec(&desc2).unwrap(),
-    )
-    .unwrap();
+    queue_desc(&jobs_dir, "job2", &desc2);
     let job2 = wait_job(&job_rx);
     let coordinator::Decision::Accept { .. } = &job2.decision else {
         panic!("job 2 should accept");
@@ -144,11 +145,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
     // --- job 3: demo-hash-smoke AGAIN, targeted at a fresh worker wC whose
     // only blob source is worker A (p2p exchange) ---
     let desc3 = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
-    std::fs::write(
-        jobs_dir.join("job3@wC.desc.json"),
-        serde_json::to_vec(&desc3).unwrap(),
-    )
-    .unwrap();
+    queue_desc(&jobs_dir, "job3@wC", &desc3);
     {
         let server = bound.to_string();
         let identity = identities.join("wC.key");
@@ -256,11 +253,7 @@ fn tls_network_session() {
     });
     let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
 
-    std::fs::write(
-        jobs_dir.join("job1.desc.json"),
-        serde_json::to_vec(&desc).unwrap(),
-    )
-    .unwrap();
+    queue_desc(&jobs_dir, "job1", &desc);
 
     let identities = root.join("identities");
     std::fs::create_dir_all(&identities).unwrap();
@@ -347,11 +340,7 @@ fn reserve_escalation_beats_lying_worker() {
     std::thread::spawn(move || net::serve(cfg).expect("serve"));
     let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
 
-    std::fs::write(
-        jobs_dir.join("job1.desc.json"),
-        serde_json::to_vec(&desc).unwrap(),
-    )
-    .unwrap();
+    queue_desc(&jobs_dir, "job1", &desc);
 
     let identities = root.join("identities");
     std::fs::create_dir_all(&identities).unwrap();
@@ -392,4 +381,76 @@ fn reserve_escalation_beats_lying_worker() {
     for h in handles {
         h.join().unwrap().unwrap();
     }
+}
+
+/// A descriptor being written while the coordinator polls the watched
+/// directory must not kill the server: the poll skips the unreadable
+/// file for the grace window, and the job runs once the write
+/// completes. Regression for the mid-write empty-file race that
+/// crashed serve ("EOF while parsing a value at line 1 column 0").
+#[test]
+fn partial_descriptor_write_does_not_kill_server() {
+    let smoke_elf = std::path::Path::new("../../jobs/demo-hash-smoke/program.elf");
+    if !smoke_elf.exists() {
+        eprintln!("SKIP: build the demo-hash-smoke job first");
+        return;
+    }
+    let root = temp_dir("p2pc-net-partial-desc");
+    let jobs_dir = root.join("jobs");
+    let store_dir = root.join("store");
+    std::fs::create_dir_all(&jobs_dir).unwrap();
+    let store = contentstore::Store::open(&store_dir).unwrap();
+    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
+
+    let (bound_tx, bound_rx) = channel();
+    let (job_tx, job_rx) = channel::<JobOutcome>();
+    let cfg = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        jobs_dir: jobs_dir.clone(),
+        store_dir: store_dir.clone(),
+        per_job_deadline: std::time::Duration::from_secs(90),
+        ledger: None,
+        require_identity: true,
+        pool: Some(1),
+        round1_size: None,
+        round1_ids: None,
+        tls: None,
+        bound_tx: Some(bound_tx),
+        max_jobs: Some(1),
+        job_tx: Some(job_tx),
+    };
+    std::thread::spawn(move || net::serve(cfg).expect("serve"));
+    let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+
+    // Simulate the mid-write window: an empty file sits where the
+    // descriptor will land. The old scan treated this as fatal.
+    std::fs::write(jobs_dir.join("job1.desc.json"), b"").unwrap();
+
+    let identities = root.join("identities");
+    std::fs::create_dir_all(&identities).unwrap();
+    let server = bound.to_string();
+    let identity = identities.join("wA.key");
+    let store_dir = root.join("worker-store-wA");
+    let worker = std::thread::spawn(move || {
+        run_daemon(&DaemonConfig {
+            server,
+            worker_id: "wA".into(),
+            identity_path: Some(identity),
+            store_dir,
+            listen_port: None,
+            tls: None,
+            corrupt: false,
+            corrupt_byte: None,
+        })
+    });
+
+    // Well inside the grace window: finish the write atomically.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    queue_desc(&jobs_dir, "job1", &desc);
+
+    let job1 = wait_job(&job_rx);
+    let coordinator::Decision::Accept { .. } = &job1.decision else {
+        panic!("job should accept after the descriptor write completes");
+    };
+    worker.join().unwrap().unwrap();
 }
