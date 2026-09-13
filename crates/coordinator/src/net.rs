@@ -227,18 +227,27 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
             if !job.dispatched {
                 let map = conns.lock().unwrap();
                 let named = cfg.round1_ids.as_ref();
+                let authed_count = map.values().filter(|c| c.authed).count();
                 let targets_ready = match (&job.targets, named) {
-                    (Some(ids), _) => ids.iter().all(|id| {
-                        map.values().any(|c| c.authed && &c.worker_id == id)
-                    }),
-                    (_, Some(ids)) => ids.iter().all(|id| {
-                        map.values().any(|c| c.authed && &c.worker_id == id)
-                    }),
-                    (None, None) => map
-                        .values()
-                        .filter(|c| c.authed)
-                        .count()
-                        >= cfg.pool.unwrap_or(1),
+                    (Some(ids), _) => {
+                        // Named targets: wait for the targets AND the
+                        // full pool so escalation reserves are populated.
+                        let pool_ready = cfg
+                            .pool
+                            .map_or(true, |p| authed_count >= p);
+                        ids.iter().all(|id| {
+                            map.values().any(|c| c.authed && &c.worker_id == id)
+                        }) && pool_ready
+                    }
+                    (_, Some(ids)) => {
+                        let pool_ready = cfg
+                            .pool
+                            .map_or(true, |p| authed_count >= p);
+                        ids.iter().all(|id| {
+                            map.values().any(|c| c.authed && &c.worker_id == id)
+                        }) && pool_ready
+                    }
+                    (None, None) => authed_count >= cfg.pool.unwrap_or(1),
                 };
                 if targets_ready {
                     // Pass 1 (immutable): collect eligible workers and

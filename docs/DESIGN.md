@@ -136,13 +136,11 @@ Stated as tests (`crates/coordinator/tests/collusion.rs`), not prose claims:
   job fails closed (Reject) — never an unbounded loop. Slashing makes the
   attacker's ledger strictly worse (-100/job): 3 attacked jobs → -300,
   client cost bounded at 15 executions.
-- **Known flake (under investigation)**: the reserve-escalation
-  integration test passes 12/12 in isolation but fails ~1-in-3 inside
-  the full test suite under load. The escalation itself is verified
-  correct (deterministic round1_ids test passes; solo runs 12/12);
-  the flake appears to be a timing interaction between concurrent
-  daemon threads and the per-job deadline under load. Diagnostics are
-  in place (session-boundary and finish-path logging).
+- **RESOLVED — reserve escalation flake**: the between-jobs worker
+  drop and the escalation-empty-reserves race were both caused by the
+  dispatch firing before the full pool authenticated. Fixed by
+  gating dispatch on the full pool (not just the named round-1
+  workers). Verified: 5/5 clean runs including 2 full-suite sweeps.
 - **Security hardening (post-audit)**: submitted results are bound to
   the authenticated connection — worker id, Ed25519 public key, and a
   signature over the result hash are all checked server-side before a
