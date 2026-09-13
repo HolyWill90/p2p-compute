@@ -13,8 +13,6 @@ pub enum Trap {
     FetchUnaligned,
     FetchOutOfRange,
     IllegalInstruction { pc: u64, inst: u32 },
-    MisalignedLoad { addr: u64 },
-    MisalignedStore { addr: u64 },
     LoadOutOfRange { addr: u64 },
     StoreOutOfRange { addr: u64 },
     Ecall,
@@ -164,8 +162,12 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Opti
                 0b011 => 8,
                 _ => return Err(illegal(pc, inst)),
             };
-            if Some(&addr) == tohost_addr.as_ref() && len == 8 {
-                cpu.tohost = Some(b);
+            if Some(&addr) == tohost_addr.as_ref() && (len == 8 || len == 4) {
+                // riscv-test-env posts the exit code with a 32-bit
+                // store to the low half (zeroing the upper half in a
+                // second store); spike-style guests write all 8 bytes.
+                let value = if len == 8 { b } else { b & 0xffff_ffff };
+                cpu.tohost = Some(value);
             }
             let bytes = b.to_le_bytes();
             match mem.write(addr, &bytes[..len]) {
@@ -310,6 +312,16 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Opti
                     return Err(Trap::Ecall);
                 }
                 (0b000, 1) => return Ok(true), // EBREAK: clean halt, pc stays put
+                (0b000, 0x302) => {
+                    // MRET: return from the trap handler. pc comes from
+                    // mepc (set on trap entry or by the handler for a
+                    // retried/skipped instruction); MPP resets to user
+                    // per spec. MPIE/MIE are moot — the model has no
+                    // interrupt source.
+                    cpu.pc = cpu.mepc;
+                    cpu.mstatus &= !0x1800;
+                    return Ok(false);
+                }
                 // Zicsr: a minimal machine-mode CSR model. mtvec/mepc/
                 // mcause/mstatus are architectural (hashed); unknown
                 // CSRs read as zero and ignore writes — deterministic
@@ -774,14 +786,12 @@ pub fn execute_chunk_from(
 
 fn trap_load(e: crate::mem::MemError, addr: u64) -> Trap {
     match e {
-        crate::mem::MemError::Misaligned => Trap::MisalignedLoad { addr },
         crate::mem::MemError::OutOfRange => Trap::LoadOutOfRange { addr },
     }
 }
 
 fn trap_store(e: crate::mem::MemError, addr: u64) -> Trap {
     match e {
-        crate::mem::MemError::Misaligned => Trap::MisalignedStore { addr },
         crate::mem::MemError::OutOfRange => Trap::StoreOutOfRange { addr },
     }
 }
@@ -871,11 +881,22 @@ pub fn run(mem: &mut Mem, entry: u64, input: &[u8], cfg: &Config) -> RunOutcome 
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    // Optional window start: trace instructions [from, from + trace_first)
+    // instead of [0, trace_first) — debugging a loop needs its middle.
+    let trace_from: usize = std::env::var("RVCORE_TRACE_FROM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     loop {
-        if trace_first > 0 && (n as usize) < trace_first {
-            eprintln!("[trace] pc={:#x} inst={:#010x} mtvec={:#x}", cpu.pc,
-                mem.read(cpu.pc, 4).unwrap_or(0), cpu.mtvec);
+        let tracing = trace_first > 0
+            && (n as usize) >= trace_from
+            && (n as usize) < trace_from + trace_first;
+        if tracing {
+            // The 4-byte probe prints 0 on 2-aligned pcs (misaligned
+            // read); the real fetch below uses the 2-byte step.
+            let hw = mem.read(cpu.pc, 2).unwrap_or(0);
+            eprintln!("[trace] n={} pc={:#x} hw={:#06x} mtvec={:#x}", n, cpu.pc, hw, cpu.mtvec);
         }
         if progress_every > 0 && n.is_multiple_of(progress_every) && n > 0 {
             eprintln!("[rvcore] pc {:#x} inst {}", cpu.pc, n);
@@ -929,9 +950,7 @@ pub fn run(mem: &mut Mem, entry: u64, input: &[u8], cfg: &Config) -> RunOutcome 
                     if cpu.mtvec != 0 {
                         cpu.mcause = match t {
                             Trap::IllegalInstruction { .. } => 2,
-                            Trap::MisalignedLoad { .. } => 4,
                             Trap::LoadOutOfRange { .. } => 5,
-                            Trap::MisalignedStore { .. } => 6,
                             Trap::StoreOutOfRange { .. } => 7,
                             Trap::Ecall => 8,
                             _ => 0,

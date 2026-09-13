@@ -13,7 +13,6 @@ pub const ADDR_SPACE: u64 = 1 << 32;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemError {
     OutOfRange,
-    Misaligned,
 }
 
 type Page = Box<[u8; PAGE_SIZE]>;
@@ -62,11 +61,10 @@ impl Mem {
         if addr + len as u64 > ADDR_SPACE {
             return Err(MemError::OutOfRange);
         }
-        // Alignment is part of the determinism contract: misaligned
-        // accesses trap rather than silently succeeding.
-        if addr % len as u64 != 0 {
-            return Err(MemError::Misaligned);
-        }
+        // Misaligned accesses are supported: the byte loop splits
+        // them across pages, which is fully deterministic. This
+        // matches the spike/QEMU platform behavior the conformance
+        // differentials validate against.
         let mut val = 0u64;
         for i in 0..len {
             let a = addr + i as u64;

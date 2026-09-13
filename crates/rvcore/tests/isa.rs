@@ -273,16 +273,20 @@ fn sltiu_compares_against_sign_extended_imm() {
 }
 
 #[test]
-fn misaligned_load_traps() {
-    let t = exec_trap(
+fn misaligned_load_supported() {
+    // The platform supports misaligned accesses (spike/QEMU behavior):
+    // the split read returns the correct composed value.
+    let (cpu, _) = exec(
         &[
-            u_type(0x40000, 5, 0b0110111),
-            i_type(1, 5, 2, 6, LOAD),
+            u_type(0x000ab, 6, 0b0110111), // lui a2, 0xab — data base 0xab000
+            i_type(1, 6, 2, 7, LOAD),      // lw a3, 1(a2) — misaligned
             ebreak(),
         ],
-        |_| {},
+        |mem| {
+            mem.write(0x000a_b001, &[0x01, 0x02, 0x03, 0x04]).unwrap();
+        },
     );
-    assert!(matches!(t, Trap::MisalignedLoad { .. }));
+    assert_eq!(cpu.get(7), 0x0403_0201);
 }
 
 #[test]

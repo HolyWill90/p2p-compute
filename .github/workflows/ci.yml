@@ -38,6 +38,9 @@ jobs:
       - name: Unit tests (ISA + quorum + network integration)
         run: cargo test --workspace
 
+      - name: Official riscv-tests tally (tohost)
+        run: cargo run -p conformance -- arch arch-tests
+
       - name: Differential determinism (debug vs release on this OS)
         run: |
           cargo run --release -p difftest -- jobs/demo-hash
@@ -82,6 +85,9 @@ jobs:
           sudo apt-get install -y -qq qemu-user
           qemu-riscv64 jobs/conformance/program.elf > target/conformance-qemu.out
           cargo run --release -p conformance -- compare target/conformance-emu.out target/conformance-qemu.out
+
+      - name: Official riscv-tests tally (tohost, release)
+        run: cargo run --release -p conformance -- arch arch-tests
 
   cross-verify:
     needs: test

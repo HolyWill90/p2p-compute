@@ -26,8 +26,14 @@ Build the substrate first; the tiers plug into it.
   - the entire architectural state is 32 registers + pc + memory — there is no
     hidden state to diverge (no flags, no clock, no ambient RNG);
   - reads of unallocated pages are defined as zero; writes allocate;
-  - misaligned loads/stores trap; address space is a flat 4 GiB;
-  - `ecall` traps, `ebreak` halts cleanly, invalid encodings trap;
+  - misaligned loads/stores are supported (the byte-level access splits
+    across pages, which is fully deterministic) — matching the
+    spike/QEMU platform behavior the conformance differentials validate
+    against; instruction fetch still requires canonical 2-byte
+    alignment (RVC); address space is a flat 4 GiB;
+  - `ecall` traps (or is a QEMU-compatible syscall in conformance mode),
+    `ebreak` halts cleanly, `mret` returns to `mepc`, invalid encodings
+    trap;
   - traps and the instruction limit are themselves part of the canonical
     chain (a trapped job has a well-defined identity too).
 - **Chunk hash chain**: after every `chunk_size` instructions and at exit,
@@ -164,11 +170,26 @@ Stated as tests (`crates/coordinator/tests/collusion.rs`), not prose claims:
   register instead of the sign-extended 32-bit dividend, and the Q1
   f3=100 group ignored bit12, decoding C.SUBW/C.ADDW as C.SUB/C.XOR.
   Each has a dedicated regression test. The official riscv-tests suite
-  (rv64ui/um/uc-p-*) is built in Docker and runs through the emulator;
-  WIP: the test binaries need the standard riscv-test-env linker flow
-  (the hand-rolled link script creates alignment gaps that the pc falls
-  into). The conformance runner (`conformance arch`) tallies tohost
-  pass/fail per test.
+  (rv64ui/um/uc-p-*) now runs in full: **67/67 pass** through the
+  emulator (`conformance arch`, wired into CI on all platforms and in
+  the QEMU conformance job). Reaching that surfaced three real
+  emulator bugs the project's own tests had missed:
+  - the ELF loader's `.tohost` section parser silently returned None
+    on every real ELF (an unbounded slice read that only converts when
+    exactly 8 bytes remain), so tohost exits never fired — the earlier
+    "linker alignment gaps" theory was wrong;
+  - the tohost device only detected 8-byte stores, while
+    riscv-test-env posts its exit code with a 32-bit store;
+  - `mret` was not implemented (every test's machine-mode init ends
+    with `csrw mepc; mret`, which illegally trapped into the handler).
+- **Platform policy change — misaligned accesses**: the emulator used
+  to trap on misaligned loads/stores. Both independent references the
+  project validates against (qemu-riscv64, and spike via the official
+  riscv-tests `ma_data`) support them, and the byte-level split across
+  pages is exactly as deterministic as trapping. The memory model now
+  supports misaligned accesses; instruction fetch keeps the canonical
+  2-byte alignment. The former `misaligned_load_traps` regression test
+  now asserts the split read returns the correct composed value.
 - **Honest scope notes**: bond "slashing" is JSON ledger bookkeeping, not
   on-chain escrow; random sampling is unbiased but the reserve pool is
   only as Sybil-resistant as worker identities (keypairs, not stake).
@@ -227,8 +248,9 @@ from the dispatch decision.
 
 ## Known gaps (next milestones)
 
-1. Official `riscv-arch-test` suite (the QEMU differential covers the
-   practical subset; the official suite is the exhaustive form).
+1. Official `riscv-arch-test` suite (the full official riscv-tests
+   rv64ui/um/uc suites pass 67/67; riscv-arch-test is the more
+   exhaustive, differently-generated form).
 2. SP1 tier operationalization: proofs run in a container today; a
    prover-market integration (or GPU proving) is the production step.
 3. Bisection dispute protocol for on-chain adjudication where full chains

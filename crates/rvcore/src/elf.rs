@@ -96,8 +96,12 @@ fn find_tohost_section(
     if shoff == 0 || shnum == 0 {
         return None;
     }
+    // The shstrtab header's sh_offset field: read exactly its 8 bytes.
+    // (A whole-tail `get(start..)` would not convert to [u8; 8] unless
+    // the header happened to end the file, silently yielding None.)
+    let shstr_hdr = shoff + shstrndx * shentsize;
     let shstr_offset = u64::from_le_bytes(
-        data.get(shoff + shstrndx * shentsize + 24..)?.try_into().ok()?,
+        data.get(shstr_hdr + 24..shstr_hdr + 32)?.try_into().ok()?,
     ) as usize;
     for i in 0..shnum {
         let base = shoff + i * shentsize;

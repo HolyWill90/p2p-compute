@@ -67,15 +67,18 @@ cargo run --release -p coordinator -- run jobs/demo-hash --worker target/release
 # 8. conformance differential: same ELF under our emulator and qemu-riscv64
 scripts/qemu-conformance.sh
 
-# 9. dispute game: honest claim vs corrupt counter-result
+# 9. official riscv-tests: the full rv64ui/um/uc suites pass 67/67
+cargo run --release -p conformance -- arch arch-tests
+
+# 10. dispute game: honest claim vs corrupt counter-result
 target/release/worker.exe run jobs/demo-hash --id w1 --out target/a.json --snapshots target/snaps-w1
 target/release/worker.exe run jobs/demo-hash --id w2 --out target/b.json --corrupt
 target/release/coordinator.exe dispute jobs/demo-hash --a target/a.json --b target/b.json --snapshots target/snaps-w1
 
-# 10. optimistic acceptance (add --challenge to dispute inside the window)
+# 11. optimistic acceptance (add --challenge to dispute inside the window)
 target/release/coordinator.exe optimistic jobs/demo-hash --worker target/release/worker.exe --window-ms 50
 
-# 11. agent-task pilot: deterministic agent-shaped batch work with an audit chain
+# 12. agent-task pilot: deterministic agent-shaped batch work with an audit chain
 cargo run --release -p worker -- run jobs/agent-task --id agent
 
 # 12. content-addressed store: publish a job, reconstruct it anywhere from hashes
@@ -112,8 +115,11 @@ The emulator guarantees:
 
 - entire architectural state = 32 registers + pc + memory (nothing hidden);
 - reads of unallocated pages are zero; writes allocate; 4 GiB flat space;
-- misaligned access, invalid encodings, `ecall` → deterministic trap;
-- `ebreak` → clean halt; output is read from the ABI's output region;
+- misaligned loads/stores are supported (deterministic byte-level split,
+  matching spike/QEMU); invalid encodings and out-of-range accesses trap;
+- `ecall` traps (QEMU-compatible syscall mode for the conformance
+  differential); `ebreak` → clean halt; output is read from the ABI's
+  output region;
 - hash chain: `BLAKE3(prev_hash || registers || pc || memory_root)` emitted
   every `chunk_size` instructions and at exit.
 

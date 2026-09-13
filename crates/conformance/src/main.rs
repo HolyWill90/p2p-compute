@@ -23,13 +23,20 @@ enum Cmd {
     Arch { dir: PathBuf },
 }
 
-fn run_elf(elf: &Path) -> Result<rvcore::RunOutcome, String> {
+/// `mode`: Emu runs the QEMU-compatible syscall environment (conformance
+/// differential); Arch runs bare-metal — ecall traps into the test's own
+/// mtvec handler, and the exit is the tohost device store.
+fn run_elf(elf: &Path, syscalls: bool) -> Result<rvcore::RunOutcome, String> {
     let bytes = std::fs::read(elf).map_err(|e| format!("read: {e}"))?;
     let image = rvcore::elf::parse(&bytes).map_err(|e| format!("elf: {e}"))?;
     let mut mem = rvcore::Mem::new();
     rvcore::elf::load(&mut mem, &image).map_err(|e| format!("load: {e}"))?;
     let cfg = rvcore::Config {
-        syscalls: true,
+        syscalls,
+        // The riscv-tests exit by storing to the tohost device word and
+        // then self-looping (the host is expected to poll the device);
+        // without the address the loop never ends.
+        tohost_addr: image.tohost_addr,
         max_instructions: 10_000_000,
         ..Default::default()
     };
@@ -39,7 +46,7 @@ fn run_elf(elf: &Path) -> Result<rvcore::RunOutcome, String> {
 fn main() {
     match Cmd::parse() {
         Cmd::Emu { elf, out } => {
-            let outcome = run_elf(&elf).unwrap_or_else(|e| {
+            let outcome = run_elf(&elf, true).unwrap_or_else(|e| {
                 eprintln!("error: {e}");
                 std::process::exit(2);
             });
@@ -98,7 +105,7 @@ fn main() {
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
-                match run_elf(elf) {
+                match run_elf(elf, false) {
                     Ok(outcome) => match outcome.status {
                         rvcore::ExitStatus::Tohost(1) => pass += 1,
                         rvcore::ExitStatus::Tohost(v) => {
