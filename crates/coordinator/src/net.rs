@@ -417,6 +417,13 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                 },
                 other => other,
             };
+            eprintln!(
+                "[net] job finished: {} results, dispatched [{}], reserves [{}], decision {:?}",
+                job.results.len(),
+                job.dispatched_ids.join(","),
+                job.reserves.join(","),
+                decision
+            );
             let deltas = slashing(&decision, &job.results);
             finish_ledger(&cfg, &job_id, &decision, &deltas);
             let outcome = JobOutcome {

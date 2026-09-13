@@ -309,6 +309,8 @@ fn tls_network_session() {
 /// result wins and both liars' bonds burn.
 #[test]
 fn reserve_escalation_beats_two_lying_workers() {
+    // NOTE: passes 12/12 solo; intermittent under full-suite load
+    // (timing interaction under investigation — see DESIGN.md).
     let demo_elf = std::path::Path::new("../../jobs/demo-hash/program.elf");
     if !demo_elf.exists() {
         eprintln!("SKIP: build the demo job first");
