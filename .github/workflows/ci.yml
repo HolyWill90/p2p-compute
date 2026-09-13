@@ -31,12 +31,17 @@ jobs:
           (cd jobs/agent-task/job && cargo build --release)
           cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash/program.elf
           cp jobs/agent-task/job/target/riscv64imac-unknown-none-elf/release/agent-task jobs/agent-task/program.elf
+          # Smoke job reuses the demo-hash program with a 32 KiB input so
+          # the network tests execute seconds, not minutes, on CI.
+          cp jobs/demo-hash/program.elf jobs/demo-hash-smoke/program.elf
 
       - name: Unit tests (ISA + quorum + network integration)
         run: cargo test --workspace
 
       - name: Differential determinism (debug vs release on this OS)
-        run: cargo run --release -p difftest -- jobs/demo-hash
+        run: |
+          cargo run --release -p difftest -- jobs/demo-hash
+          cargo run --release -p difftest -- jobs/demo-hash-smoke
 
       - name: Stage result hash with a per-OS filename
         shell: bash

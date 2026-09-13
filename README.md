@@ -32,6 +32,7 @@ crates/contentstore BLAKE3-addressed blob store (the torrent layer, seeded)
 crates/difftest    differential determinism harness
 crates/conformance ISA conformance differential driver (emulator vs QEMU)
 jobs/demo-hash     the demo job: no_std Rust, compiled to a RISC-V ELF
+jobs/demo-hash-smoke same program, 32 KiB input — powers the fast network tests
 jobs/conformance   ISA corner-case suite (explicit inline asm, both impls)
 jobs/agent-task    the agent-work pilot job (see docs/PILOT.md)
 sp1-guest          the demo algorithm as an SP1 zkVM guest (zk tier harness)

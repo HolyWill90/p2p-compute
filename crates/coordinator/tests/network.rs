@@ -1,9 +1,9 @@
 //! The full-network integration test over REAL TCP sockets, three
 //! jobs in one persistent session:
-//!   job 1: demo-hash → all workers (quorum accept)
+//!   job 1: demo-hash-smoke → all workers (quorum accept)
 //!   job 2: agent-task → all workers (a second, different job over
 //!          the same session — blobs fetched from the coordinator)
-//!   job 3: demo-hash again → targeted at a NEW worker wC with an
+//!   job 3: demo-hash-smoke again → targeted at a NEW worker wC with an
 //!          empty store, whose only peer hint is wA. The blobs must
 //!          arrive worker-to-worker: wA's served counter goes up,
 //!          wC's from-server counter stays zero.
@@ -21,16 +21,19 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn wait_job(rx: &std::sync::mpsc::Receiver<JobOutcome>) -> JobOutcome {
-    rx.recv_timeout(std::time::Duration::from_secs(110))
+    // Upper bound = the coordinator's own worst case (two full per-job
+    // deadline windows: round 1 + escalation) plus slow-runner
+    // headroom. Smoke jobs finish in seconds; only a hang trips this.
+    rx.recv_timeout(std::time::Duration::from_secs(300))
         .expect("job finished in time")
 }
 
 #[test]
 fn multi_job_session_with_p2p_blob_exchange() {
-    let demo_elf = std::path::Path::new("../../jobs/demo-hash/program.elf");
+    let demo_elf = std::path::Path::new("../../jobs/demo-hash-smoke/program.elf");
     let agent_elf = std::path::Path::new("../../jobs/agent-task/program.elf");
     if !demo_elf.exists() || !agent_elf.exists() {
-        eprintln!("SKIP: build the demo-hash and agent-task jobs first");
+        eprintln!("SKIP: build the demo-hash-smoke and agent-task jobs first");
         return;
     }
     let root = temp_dir("p2pc-net-multi");
@@ -40,7 +43,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
     let store = contentstore::Store::open(&store_dir).unwrap();
 
     // Publish the two distinct jobs into the server's store.
-    let desc1 = contentstore::publish(&PathBuf::from("../../jobs/demo-hash"), &store).unwrap();
+    let desc1 = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
     let desc2 = contentstore::publish(&PathBuf::from("../../jobs/agent-task"), &store).unwrap();
 
     let (bound_tx, bound_rx) = channel();
@@ -115,9 +118,9 @@ fn multi_job_session_with_p2p_blob_exchange() {
         }));
     }
 
-    // --- job 1: demo-hash, both workers, quorum accept ---
+    // --- job 1: demo-hash-smoke, both workers, quorum accept ---
     let job1 = wait_job(&job_rx);
-    assert_eq!(job1.job_id, "demo-hash-0001");
+    assert_eq!(job1.job_id, "demo-hash-smoke-0001");
     assert_eq!(job1.results.len(), 2, "both workers ran job 1");
     assert_eq!(job1.results[0].result_hash, job1.results[1].result_hash);
     let demo_digest = job1.results[0].result_hash.clone();
@@ -138,9 +141,9 @@ fn multi_job_session_with_p2p_blob_exchange() {
     };
     assert_eq!(job2.results.len(), 2);
 
-    // --- job 3: demo-hash AGAIN, targeted at a fresh worker wC whose
+    // --- job 3: demo-hash-smoke AGAIN, targeted at a fresh worker wC whose
     // only blob source is worker A (p2p exchange) ---
-    let desc3 = contentstore::publish(&PathBuf::from("../../jobs/demo-hash"), &store).unwrap();
+    let desc3 = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
     std::fs::write(
         jobs_dir.join("job3@wC.desc.json"),
         serde_json::to_vec(&desc3).unwrap(),
@@ -164,7 +167,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
         }));
     }
     let job3 = wait_job(&job_rx);
-    assert_eq!(job3.job_id, "demo-hash-0001");
+    assert_eq!(job3.job_id, "demo-hash-smoke-0001");
     assert_eq!(job3.results.len(), 1, "job 3 targeted at wC only");
     assert_eq!(job3.results[0].result_hash, demo_digest, "re-execution matches job 1");
     let coordinator::Decision::Accept { .. } = &job3.decision else {
@@ -205,7 +208,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
 /// auth, blob fetch, execution, signed result — runs encrypted.
 #[test]
 fn tls_network_session() {
-    let demo_elf = std::path::Path::new("../../jobs/demo-hash/program.elf");
+    let demo_elf = std::path::Path::new("../../jobs/demo-hash-smoke/program.elf");
     if !demo_elf.exists() {
         eprintln!("SKIP: build the demo job first");
         return;
@@ -216,7 +219,7 @@ fn tls_network_session() {
     std::fs::create_dir_all(&jobs_dir).unwrap();
     let store = contentstore::Store::open(&store_dir).unwrap();
 
-    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash"), &store).unwrap();
+    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
     let cert_path = store_dir.join("coordinator-cert.der");
 
     let (bound_tx, bound_rx) = channel();
@@ -286,7 +289,7 @@ fn tls_network_session() {
     }
 
     let job1 = wait_job(&job_rx);
-    assert_eq!(job1.job_id, "demo-hash-0001");
+    assert_eq!(job1.job_id, "demo-hash-smoke-0001");
     assert_eq!(job1.results.len(), 2);
     assert_eq!(job1.results[0].result_hash, job1.results[1].result_hash);
     let coordinator::Decision::Accept { hash, agreed, .. } = &job1.decision else {
@@ -294,8 +297,8 @@ fn tls_network_session() {
     };
     assert_eq!(agreed.len(), 2, "both TLS workers agreed");
 
-    // Digest sanity: matches the known demo-hash result.
-    assert_eq!(hash, "297c55c235e4e721cb10bddf7246c85a5ae592a46f889c35dfa896c14cbddba2");
+    // Digest sanity: matches the known demo-hash-smoke result.
+    assert_eq!(hash, "ec48428c70dc764655f78d63389bd3be14275f129cb72c6fa5c007d8692c8662");
 
     for h in handles {
         h.join().unwrap().unwrap();
@@ -312,7 +315,7 @@ fn tls_network_session() {
 fn reserve_escalation_beats_lying_worker() {
     // Regression guard: dispatch waits for full-pool authentication so
     // escalation reserves are populated (see DESIGN.md, RESOLVED entry).
-    let demo_elf = std::path::Path::new("../../jobs/demo-hash/program.elf");
+    let demo_elf = std::path::Path::new("../../jobs/demo-hash-smoke/program.elf");
     if !demo_elf.exists() {
         eprintln!("SKIP: build the demo job first");
         return;
@@ -322,7 +325,7 @@ fn reserve_escalation_beats_lying_worker() {
     let store_dir = root.join("store");
     std::fs::create_dir_all(&jobs_dir).unwrap();
     let store = contentstore::Store::open(&store_dir).unwrap();
-    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash"), &store).unwrap();
+    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
 
     let (bound_tx, bound_rx) = channel();
     let (job_tx, job_rx) = channel::<JobOutcome>();
@@ -384,7 +387,7 @@ fn reserve_escalation_beats_lying_worker() {
     let coordinator::Decision::Accept { hash, agreed, .. } = &job1.decision else {
         panic!("escalation should end in accept, got {:?}", job1.decision);
     };
-    assert_eq!(hash, "297c55c235e4e721cb10bddf7246c85a5ae592a46f889c35dfa896c14cbddba2");
+    assert_eq!(hash, "ec48428c70dc764655f78d63389bd3be14275f129cb72c6fa5c007d8692c8662");
     assert_eq!(agreed, &vec!["wA".to_string(), "wC".to_string()]);
     for h in handles {
         h.join().unwrap().unwrap();

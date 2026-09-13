@@ -136,11 +136,20 @@ Stated as tests (`crates/coordinator/tests/collusion.rs`), not prose claims:
   job fails closed (Reject) — never an unbounded loop. Slashing makes the
   attacker's ledger strictly worse (-100/job): 3 attacked jobs → -300,
   client cost bounded at 15 executions.
-- **RESOLVED — reserve escalation flake**: the between-jobs worker
-  drop and the escalation-empty-reserves race were both caused by the
-  dispatch firing before the full pool authenticated. Fixed by
-  gating dispatch on the full pool (not just the named round-1
-  workers). Verified: 5/5 clean runs including 2 full-suite sweeps.
+- **RESOLVED — reserve escalation flake**: two distinct causes.
+  First, the between-jobs worker drop and the escalation-empty-reserves
+  race were both caused by dispatch firing before the full pool
+  authenticated — fixed by gating dispatch on the full pool (not just
+  the named round-1 workers). Second, even with that fixed, the
+  network tests stayed marginal on 2-core CI runners: the 2 MiB
+  demo-hash job costs ~33.5M debug-build instructions per execution,
+  so a full round-1 + escalation run could outgrow the test's 110s
+  receive timeout on windows-latest. The network tests now run
+  `jobs/demo-hash-smoke` (same program, 32 KiB input → 524K
+  instructions, seconds per execution; honest hash ends in '2', so
+  the corruption hook still diverges), and the test receive bound was
+  raised to 300s — the coordinator's own worst case is two full
+  90s deadline windows, so anything past that is a genuine hang.
 - **Security hardening (post-audit)**: submitted results are bound to
   the authenticated connection — worker id, Ed25519 public key, and a
   signature over the result hash are all checked server-side before a
