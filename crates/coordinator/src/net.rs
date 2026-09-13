@@ -377,6 +377,11 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                             }
                         }
                         job.escalated = true;
+                        // The escalation round gets its own execution
+                        // window: the reserve workers were idle while
+                        // round 1 ran, and slow runners need the full
+                        // budget for the fresh execution.
+                        job.started = Instant::now();
                         println!(
                             "no majority in round 1 — escalating to [{}]",
                             reserves.join(", ")
