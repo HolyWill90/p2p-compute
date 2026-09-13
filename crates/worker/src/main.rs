@@ -83,7 +83,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len() / 2)
@@ -101,7 +101,7 @@ fn load_or_create_identity(path: &std::path::Path) -> SigningKey {
     let mut seed = [0u8; 32];
     use rand_core::RngCore;
     rand_core::OsRng.fill_bytes(&mut seed);
-    std::fs::write(path, &seed).expect("write identity file");
+    std::fs::write(path, seed).expect("write identity file");
     SigningKey::from_bytes(&seed)
 }
 
@@ -208,7 +208,7 @@ fn cmd_run(args: RunArgs) {
     }
 }
 
-fn flip_last(s: &mut String) {
+fn flip_last(s: &mut str) {
     let bytes = unsafe { s.as_bytes_mut() };
     let n = bytes.len();
     bytes[n - 1] = if bytes[n - 1] == b'0' { b'1' } else { b'0' };

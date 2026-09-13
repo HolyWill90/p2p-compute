@@ -1,4 +1,4 @@
-use contentstore::{descriptor_id, materialize, publish, ContentId, JobDescriptor, Store};
+use contentstore::{descriptor_id, materialize, publish, ContentId, Store};
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(name);
@@ -18,7 +18,7 @@ fn put_get_roundtrip_and_id_stability() {
 
     assert_eq!(store.get(&id).unwrap(), data);
     assert!(store.has(&id).unwrap());
-    assert!(store.get(&ContentId::from_data(b"absent")).is_ok() == false);
+    assert!(!store.get(&ContentId::from_data(b"absent")).is_ok());
 }
 
 #[test]

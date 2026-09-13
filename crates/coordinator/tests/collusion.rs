@@ -174,8 +174,8 @@ fn dispute_beats_mid_chain_collusion() {
     // A coherent liar extends the divergence: every later chunk hash is
     // their own fabrication (hash chains can't be re-derived without
     // re-execution, which is the point).
-    for i in (k + 1)..colluder_chain.len() {
-        colluder_chain[i] = format!("{:064x}", 0xBEEF + i as u64);
+    for (i, slot) in colluder_chain.iter_mut().enumerate().skip(k + 1) {
+        *slot = format!("{:064x}", 0xBEEF + i as u64);
     }
 
     let claim = wr("colluder", &colluder_chain.last().unwrap().clone(), colluder_chain.clone());

@@ -18,7 +18,7 @@
 //! committed hash matches the judge's result.
 
 use jobfmt::WorkerResult;
-use rvcore::{execute_chunk_from, state_hash, ChunkEnd, Config, Hash, GENESIS};
+use rvcore::{execute_chunk_from, state_hash, Config, Hash, GENESIS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {

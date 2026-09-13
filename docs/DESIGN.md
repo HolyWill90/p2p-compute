@@ -203,10 +203,12 @@ worker), collects signed results from a pool, and runs the standard
 quorum/escalation — escalation included — across real sockets.
 
 Demonstrated by `crates/coordinator/tests/network.rs` over localhost TCP:
-five daemon connections, two lying with DIFFERENT fabricated results →
-no majority in round 1 → escalation dispatches the reserves → honest
-hash accepted, liars slashed in the ledger. A subtlety worth keeping:
-a corruption whose flipped byte lands on the honest value is
+a multi-job session with peer-to-peer blob exchange, the same flow over
+TLS with fingerprint pinning, and reserve escalation — round 1 names an
+honest worker and a liar, no majority forms, the coordinator escalates
+to the held-back honest reserve, and its result joins round 1's honest
+vote for a 2/3 accept while the liar's bond burns. A subtlety worth
+keeping: a corruption whose flipped byte lands on the honest value is
 indistinguishable from honesty — test flip values must be chosen against
 the honest tail.
 

@@ -350,7 +350,7 @@ fn input_output_abi_roundtrip() {
     let output = out.output.expect("output present");
     // The program stored the input length to the OUTPUT_LEN header,
     // which the emulator consumed; the data region itself is zeros.
-    assert_eq!(output.len(), input.len() as usize);
+    assert_eq!(output.len(), input.len());
     assert!(output.iter().all(|&b| b == 0));
     assert_eq!(mem.read(INPUT_LEN_ADDR, 8).unwrap(), input.len() as u64);
     assert_eq!(mem.read(INPUT_DATA_ADDR, 1).unwrap(), b'h' as u64);

@@ -65,12 +65,12 @@ fn load_or_create_identity(path: &Path) -> SigningKey {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).expect("create identity dir");
     }
-    std::fs::write(path, &seed).expect("write identity file");
+    std::fs::write(path, seed).expect("write identity file");
     SigningKey::from_bytes(&seed)
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len() / 2)
@@ -82,7 +82,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn set_last(s: &mut String, c: char) {
+fn set_last(s: &mut str, c: char) {
     let bytes = unsafe { s.as_bytes_mut() };
     let n = bytes.len();
     bytes[n - 1] = c as u8;
@@ -248,12 +248,10 @@ fn session_once(
     // can be reported to the coordinator. A bind failure (port still
     // held by a dying previous session, for example) DEGRADES the
     // worker to fetch-only — it must never kill the daemon.
-    let mut listen_port = cfg.listen_port;
     let peer_server = match cfg.listen_port {
         Some(port) => match TcpListener::bind(("0.0.0.0", port)) {
             Ok(listener) => {
                 let actual = listener.local_addr().map_err(|e| e.to_string())?.port();
-                listen_port = Some(actual);
                 let store = Arc::new(
                     contentstore::Store::open(&cfg.store_dir).map_err(|e| e.to_string())?,
                 );

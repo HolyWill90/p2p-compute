@@ -12,7 +12,6 @@ use crate::mem::{Mem, PAGE_SIZE};
 ///
 /// Snapshots are untrusted input. Trust comes exclusively from the hash
 /// check against the chain prefix both disputing parties already agree on.
-
 pub const MAGIC: &[u8; 4] = b"RVS1";
 
 pub fn capture(cpu: &Cpu, mem: &Mem) -> Vec<u8> {

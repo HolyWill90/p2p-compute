@@ -1,3 +1,8 @@
+// The interpreter is a per-instruction hot loop: `%` lowers to a
+// single AND, while is_multiple_of stays an out-of-line call in
+// debug builds (tests run unoptimized).
+#![allow(clippy::manual_is_multiple_of)]
+
 use crate::cpu::Cpu;
 use crate::hash::{state_hash, Hash, GENESIS};
 use crate::mem::{Mem, ADDR_SPACE};
@@ -73,7 +78,7 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Opti
             | (((inst >> 8) & 0xf) << 1);
         ((v << 19) as i32 >> 19) as i64
     };
-    let imm_u = ((inst & 0xffff_f000) as u32 as i32) as i64 as u64;
+    let imm_u = ((inst & 0xffff_f000) as i32) as i64 as u64;
     let imm_j = {
         let v = (((inst >> 31) & 1) << 20)
             | (((inst >> 12) & 0xff) << 12)
@@ -173,7 +178,7 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Opti
             // OP-IMM
             let val = match f3 {
                 0b000 => a.wrapping_add(imm_i as u64),
-                0b010 => (((a as i64) < imm_i) as u64),
+                0b010 => ((a as i64) < imm_i) as u64,
                 0b011 => (a < imm_i as u64) as u64,
                 0b100 => a ^ (imm_i as u64),
                 0b110 => a | (imm_i as u64),
@@ -185,11 +190,11 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Opti
                     if (inst >> 26) & 0x3f != 0 {
                         return Err(illegal(pc, inst));
                     }
-                    a.wrapping_shl((inst >> 20) as u32 & 63)
+                    a.wrapping_shl((inst >> 20) & 63)
                 }
                 0b101 => match (inst >> 26) & 0x3f {
-                    0b000000 => a.wrapping_shr((inst >> 20) as u32 & 63),
-                    0b010000 => ((a as i64) >> ((inst >> 20) as u32 & 63)) as u64,
+                    0b000000 => a.wrapping_shr((inst >> 20) & 63),
+                    0b010000 => ((a as i64) >> ((inst >> 20) & 63)) as u64,
                     _ => return Err(illegal(pc, inst)),
                 },
                 _ => unreachable!(),
@@ -205,11 +210,11 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Opti
                     if f7 != 0 {
                         return Err(illegal(pc, inst));
                     }
-                    (((a as u32).wrapping_shl((inst >> 20) as u32 & 31)) as i32) as u64
+                    (((a as u32).wrapping_shl((inst >> 20) & 31)) as i32) as u64
                 }
                 0b101 => match f7 {
-                    0b0000000 => (((a as u32).wrapping_shr((inst >> 20) as u32 & 31)) as i32) as u64,
-                    0b0100000 => (((a as i32) >> ((inst >> 20) as u32 & 31)) as i32) as u64,
+                    0b0000000 => (((a as u32).wrapping_shr((inst >> 20) & 31)) as i32) as u64,
+                    0b0100000 => ((a as i32) >> ((inst >> 20) & 31)) as u64,
                     _ => return Err(illegal(pc, inst)),
                 },
                 _ => return Err(illegal(pc, inst)),
@@ -244,7 +249,7 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Opti
                     None if b == 0 => u64::MAX,
                     None => i64::MIN as u64, // MIN / -1
                 },
-                (0b0000001, 0b101) => if b == 0 { u64::MAX } else { a / b },
+                (0b0000001, 0b101) => a.checked_div(b).unwrap_or(u64::MAX), // ÷0: all ones
                 (0b0000001, 0b110) => match (a as i64).checked_rem(b as i64) {
                     Some(r) => r as u64,
                     None if b == 0 => a,           // rem by zero: dividend
@@ -263,8 +268,8 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Opti
                 (0b0100000, 0b000) => ((a as u32).wrapping_sub(b as u32)) as i32 as u64,
                 (0b0000000, 0b001) => (((a as u32).wrapping_shl((b & 31) as u32)) as i32) as u64,
                 (0b0000000, 0b101) => (((a as u32) >> (b & 31)) as i32) as u64,
-                (0b0100000, 0b101) => (((a as i32) >> (b & 31)) as i32) as u64,
-                (0b0000001, 0b000) => ((a as i32).wrapping_mul(b as i32)) as i32 as u64,
+                (0b0100000, 0b101) => ((a as i32) >> (b & 31)) as u64,
+                (0b0000001, 0b000) => ((a as i32).wrapping_mul(b as i32)) as u64,
                 (0b0000001, 0b100) => match (a as i32).checked_div(b as i32) {
                     Some(q) => q as i64 as u64,
                     None if b == 0 => u64::MAX, // -1 sign-extended
@@ -315,7 +320,7 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Opti
                     // Source: rs1 for register forms, the sign-extended
                     // 5-bit zimm (rs1 field) for immediate forms.
                     let src = match f3 {
-                        0b001 | 0b010 | 0b011 => a,
+                        0b001..=0b011 => a,
                         _ => {
                             let z = (inst >> 15) & 0x1f;
                             if z & 0x10 != 0 {
@@ -503,7 +508,7 @@ fn step_c(cpu: &mut Cpu, mem: &mut Mem, pc: u64, hw: u16) -> Result<bool, Trap> 
                     match (hw >> 10) & 0b11 {
                         0b00 | 0b01 => {
                             // c.srli / c.srai: shamt = inst[12]:5 bits (RV64 6-bit)
-                            let shamt = (((hw >> 12) & 0x1) << 5) | ((hw >> 2) & 0x1f) as u16;
+                            let shamt = (((hw >> 12) & 0x1) << 5) | ((hw >> 2) & 0x1f);
                             if shamt == 0 {
                                 return Err(bad()); // reserved in RV64
                             }
@@ -516,7 +521,7 @@ fn step_c(cpu: &mut Cpu, mem: &mut Mem, pc: u64, hw: u16) -> Result<bool, Trap> 
                         }
                         0b10 => {
                             // c.andi: 6-bit signed immediate
-                            cpu.set(dest, (cpu.get(dest) & imm6) as u64);
+                            cpu.set(dest, cpu.get(dest) & imm6);
                         }
                         _ => {
                             // bit12=0: c.sub/c.xor/c.or/c.and;
@@ -578,7 +583,7 @@ fn step_c(cpu: &mut Cpu, mem: &mut Mem, pc: u64, hw: u16) -> Result<bool, Trap> 
             match f3 {
                 0b000 => {
                     // c.slli: 6-bit shamt; rd == 0 → hint
-                    let shamt = (((hw >> 12) & 0x1) << 5) | ((hw >> 2) & 0x1f) as u16;
+                    let shamt = (((hw >> 12) & 0x1) << 5) | ((hw >> 2) & 0x1f);
                     if rd != 0 {
                         cpu.set(rd, cpu.get(rd).wrapping_shl(shamt as u32));
                     }
@@ -872,7 +877,7 @@ pub fn run(mem: &mut Mem, entry: u64, input: &[u8], cfg: &Config) -> RunOutcome 
             eprintln!("[trace] pc={:#x} inst={:#010x} mtvec={:#x}", cpu.pc,
                 mem.read(cpu.pc, 4).unwrap_or(0), cpu.mtvec);
         }
-        if progress_every > 0 && n % progress_every == 0 && n > 0 {
+        if progress_every > 0 && n.is_multiple_of(progress_every) && n > 0 {
             eprintln!("[rvcore] pc {:#x} inst {}", cpu.pc, n);
         }
         if n >= cfg.max_instructions {
@@ -882,69 +887,65 @@ pub fn run(mem: &mut Mem, entry: u64, input: &[u8], cfg: &Config) -> RunOutcome 
         let step_res = step_mode(&mut cpu, mem, cfg.syscalls, cfg.tohost_addr);
         // Snapshot before the hash is pushed: the snapshot's chain
         // index is chain.len() (the index it is about to get).
-        let step_res = step_res;
         let mut snap = None;
         if cfg.snapshot_dir.is_some() {
-            let at_boundary = match step_res {
-                Ok(false) => in_chunk + 1 == cfg.chunk_size,
-                _ => true,
-            };
+            let at_boundary =
+                !matches!(step_res, Ok(false)) || in_chunk + 1 == cfg.chunk_size;
             if at_boundary {
                 snap = Some(crate::snapshot::capture(&cpu, mem));
             }
         }
-        match step_res {
-            step_out => {
-                // The tohost device is checked after every step: a
-                // store to the tohost address ends the run (riscv-tests
-                // convention: value 1 = pass).
-                if cfg.tohost_addr.is_some() && cpu.tohost.is_some() {
+        let step_out = step_res;
+        {
+            // The tohost device is checked after every step: a
+            // store to the tohost address ends the run (riscv-tests
+            // convention: value 1 = pass).
+            if cfg.tohost_addr.is_some() && cpu.tohost.is_some() {
+                push_hash(&mut prev, &cpu, mem, &mut chain);
+                status = ExitStatus::Tohost(cpu.tohost.unwrap_or(0));
+                break;
+            }
+            match step_out {
+                Ok(true) => {
+                    n += 1;
+                    write_snapshot(cfg, chain.len(), &snap);
                     push_hash(&mut prev, &cpu, mem, &mut chain);
-                    status = ExitStatus::Tohost(cpu.tohost.unwrap_or(0));
+                    status = ExitStatus::Halted;
                     break;
                 }
-                match step_out {
-                    Ok(true) => {
-                        n += 1;
+                Ok(false) => {
+                    n += 1;
+                    in_chunk += 1;
+                    if in_chunk == cfg.chunk_size {
                         write_snapshot(cfg, chain.len(), &snap);
                         push_hash(&mut prev, &cpu, mem, &mut chain);
-                        status = ExitStatus::Halted;
-                        break;
+                        in_chunk = 0;
                     }
-                    Ok(false) => {
+                }
+                Err(t) => {
+                    // Route the trap to the handler the guest installed
+                    // via csrw mtvec (riscv-tests convention). mcause is
+                    // the trap cause; mepc the trapping pc.
+                    if cpu.mtvec != 0 {
+                        cpu.mcause = match t {
+                            Trap::IllegalInstruction { .. } => 2,
+                            Trap::MisalignedLoad { .. } => 4,
+                            Trap::LoadOutOfRange { .. } => 5,
+                            Trap::MisalignedStore { .. } => 6,
+                            Trap::StoreOutOfRange { .. } => 7,
+                            Trap::Ecall => 8,
+                            _ => 0,
+                        };
+                        cpu.mepc = cpu.pc;
+                        cpu.pc = cpu.mtvec & !0x3;
                         n += 1;
                         in_chunk += 1;
-                        if in_chunk == cfg.chunk_size {
-                            write_snapshot(cfg, chain.len(), &snap);
-                            push_hash(&mut prev, &cpu, mem, &mut chain);
-                            in_chunk = 0;
-                        }
+                        continue; // the handler runs; tohost decides pass/fail
                     }
-                    Err(t) => {
-                        // Route the trap to the handler the guest installed
-                        // via csrw mtvec (riscv-tests convention). mcause is
-                        // the trap cause; mepc the trapping pc.
-                        if cpu.mtvec != 0 {
-                            cpu.mcause = match t {
-                                Trap::IllegalInstruction { .. } => 2,
-                                Trap::MisalignedLoad { .. } => 4,
-                                Trap::LoadOutOfRange { .. } => 5,
-                                Trap::MisalignedStore { .. } => 6,
-                                Trap::StoreOutOfRange { .. } => 7,
-                                Trap::Ecall => 8,
-                                _ => 0,
-                            };
-                            cpu.mepc = cpu.pc;
-                            cpu.pc = cpu.mtvec & !0x3;
-                            n += 1;
-                            in_chunk += 1;
-                            continue; // the handler runs; tohost decides pass/fail
-                        }
-                        write_snapshot(cfg, chain.len(), &snap);
-                        push_hash(&mut prev, &cpu, mem, &mut chain);
-                        status = ExitStatus::Trapped(t);
-                        break;
-                    }
+                    write_snapshot(cfg, chain.len(), &snap);
+                    push_hash(&mut prev, &cpu, mem, &mut chain);
+                    status = ExitStatus::Trapped(t);
+                    break;
                 }
             }
         }

@@ -1,7 +1,7 @@
-use abi::{ELF_BASE, STACK_TOP};
+use abi::ELF_BASE;
 use rvcore::interp::{execute_chunk_from, ChunkEnd, Config};
-use rvcore::snapshot::capture; #[allow(unused_imports)] use rvcore::snapshot::capture as _cap;
-use rvcore::{state_hash, Cpu, Mem, GENESIS};
+ #[allow(unused_imports)] use rvcore::snapshot::capture as _cap;
+use rvcore::{state_hash, Mem, GENESIS};
 
 fn load_program(mem: &mut Mem, insts: &[u32]) {
     let mut base = ELF_BASE;

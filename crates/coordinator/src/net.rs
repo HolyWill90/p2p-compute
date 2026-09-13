@@ -9,7 +9,7 @@ use crate::{decide, slashing, verify_signature, Decision};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use jobfmt::WorkerResult;
 use std::collections::HashMap;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -234,7 +234,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                         // full pool so escalation reserves are populated.
                         let pool_ready = cfg
                             .pool
-                            .map_or(true, |p| authed_count >= p);
+                            .is_none_or(|p| authed_count >= p);
                         ids.iter().all(|id| {
                             map.values().any(|c| c.authed && &c.worker_id == id)
                         }) && pool_ready
@@ -242,7 +242,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                     (_, Some(ids)) => {
                         let pool_ready = cfg
                             .pool
-                            .map_or(true, |p| authed_count >= p);
+                            .is_none_or(|p| authed_count >= p);
                         ids.iter().all(|id| {
                             map.values().any(|c| c.authed && &c.worker_id == id)
                         }) && pool_ready
@@ -315,7 +315,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                                 c.authed
                                     && !selected_ids.contains(&c.worker_id.as_str())
                                     && targeted
-                                        .map_or(true, |ids| !ids.contains(&c.worker_id))
+                                        .is_none_or(|ids| !ids.contains(&c.worker_id))
                             })
                             .map(|c| c.worker_id.clone())
                             .collect()
@@ -511,10 +511,9 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                         }
                     }
                     println!(
-                        "worker authenticated: {wid}{} (pool {}/{})",
+                        "worker authenticated: {wid}{} (pool {}/open)",
                         c.peer_addr.as_ref().map(|_| " [p2p]").unwrap_or(""),
-                        map.values().filter(|c| c.authed).count(),
-                        "open"
+                        map.values().filter(|c| c.authed).count()
                     );
                 } else {
                     let _ = c.outbound.send(ServerToClient::AuthFailed {
@@ -606,12 +605,13 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
 }
 
 /// Scan the jobs directory for the first unprocessed descriptor.
+/// A queued job file: descriptor, optional explicit round-1 targets, path.
+type QueuedJob = (contentstore::JobDescriptor, Option<Vec<String>>, PathBuf);
+
 /// Returns (descriptor, targets, path) and marks the file in use by
 /// renaming to `.dispatching` — crash-safe: a renamed file is
 /// recovered by the operator, not silently re-run.
-fn scan_jobs_dir(
-    jobs_dir: &std::path::Path,
-) -> Result<Option<(contentstore::JobDescriptor, Option<Vec<String>>, PathBuf)>, String> {
+fn scan_jobs_dir(jobs_dir: &std::path::Path) -> Result<Option<QueuedJob>, String> {
     for entry in std::fs::read_dir(jobs_dir).map_err(|e| format!("jobs dir: {e}"))?.flatten() {
         let path = entry.path();
         let name = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
@@ -707,12 +707,6 @@ fn session_loop(
     tx: Sender<Event>,
     conns: Arc<Mutex<HashMap<usize, Conn>>>,
 ) {
-    let peer_ip = conns
-        .lock()
-        .unwrap()
-        .get(&conn)
-        .map(|c| c.peer_ip.clone())
-        .unwrap_or_default();
     eprintln!("conn {conn}: session loop running");
     loop {
         let frame = wire::receive_polled::<ClientToServer>(&mut stream, Duration::from_millis(100));

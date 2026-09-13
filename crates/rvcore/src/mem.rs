@@ -1,3 +1,8 @@
+// read/write sit on the per-instruction fetch and load/store paths:
+// `%` lowers to a single AND, while is_multiple_of stays an
+// out-of-line call in debug builds.
+#![allow(clippy::manual_is_multiple_of)]
+
 use std::collections::BTreeMap;
 
 pub const PAGE_SIZE: usize = 4096;
@@ -26,6 +31,12 @@ type Page = Box<[u8; PAGE_SIZE]>;
 pub struct Mem {
     pages: BTreeMap<u32, Page>,
     pub syscall_log: Vec<u8>,
+}
+
+impl Default for Mem {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Mem {

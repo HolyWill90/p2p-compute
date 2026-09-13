@@ -303,14 +303,15 @@ fn tls_network_session() {
     let _ = cert_der;
 }
 
-/// Reserve escalation over the wire: round 1 is named as two liars
-/// with distinct fabricated results (round1_ids), the honest reserve
-/// is held back, and the coordinator must escalate to it. The honest
-/// result wins and both liars' bonds burn.
+/// Reserve escalation over the wire: round 1 is named as an honest
+/// worker plus a liar (round1_ids), so no majority forms; the honest
+/// reserve is held back and the coordinator must escalate to it. The
+/// escalated result joins round 1's honest vote for a 2/3 majority,
+/// the job is accepted, and the liar's bond burns.
 #[test]
-fn reserve_escalation_beats_two_lying_workers() {
-    // NOTE: passes 12/12 solo; intermittent under full-suite load
-    // (timing interaction under investigation — see DESIGN.md).
+fn reserve_escalation_beats_lying_worker() {
+    // Regression guard: dispatch waits for full-pool authentication so
+    // escalation reserves are populated (see DESIGN.md, RESOLVED entry).
     let demo_elf = std::path::Path::new("../../jobs/demo-hash/program.elf");
     if !demo_elf.exists() {
         eprintln!("SKIP: build the demo job first");
@@ -352,15 +353,15 @@ fn reserve_escalation_beats_two_lying_workers() {
     let identities = root.join("identities");
     std::fs::create_dir_all(&identities).unwrap();
     let mut handles = Vec::new();
-    // wA honest, wB lies with byte 5, wC (reserve) lies with byte 9 —
-    // wait: wC is the RESERVE and must be HONEST for the accept case;
-    // wA honest, wB and the other reserve slots... 3 workers: wA/wB
-    // round 1 (both lying, DISTINCT fabrications), wC honest reserve.
-    let mut spawns: Vec<(&str, bool, Option<u8>)> = Vec::new();
-    spawns.push(("wA", false, None));
-    spawns.push(("wB", true, Some(5)));
-    spawns.push(("wC", false, None));
-    // Round 1 = [wA, wB]: honest + liar → no majority → escalate to wC.
+    // Pool of 3, round 1 named [wA, wB]: wA honest, wB corrupts its
+    // result, wC is the held-back honest reserve. One lie against one
+    // honest vote leaves no majority, so the coordinator escalates to
+    // wC, whose result joins wA's for the 2/3 accept.
+    let spawns: Vec<(&str, bool, Option<u8>)> = vec![
+        ("wA", false, None),
+        ("wB", true, Some(5)),
+        ("wC", false, None),
+    ];
     for (id, corrupt, byte) in spawns {
         let server = bound.to_string();
         let identity = identities.join(format!("{id}.key"));
