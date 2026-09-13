@@ -37,6 +37,12 @@ pub const SCHEMA: u32 = 1;
 /// its file fields must not escape: exactly one normal path component,
 /// no separators, no `..`.
 pub fn confined_name(name: &str) -> Result<(), String> {
+    // Backslashes are rejected on every platform: manifests are
+    // portable, and on Windows a backslash IS a separator — the
+    // strictest interpretation must hold everywhere.
+    if name.contains('\\') {
+        return Err(format!("manifest path {name:?} is not a plain file name"));
+    }
     let p = Path::new(name);
     let ok = p.is_relative()
         && p.components().collect::<Vec<_>>().len() == 1
