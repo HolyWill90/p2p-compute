@@ -151,12 +151,13 @@ fn cmd_run(args: RunArgs) {
         chunk_size: job.manifest.chunk_size,
         max_instructions: job.manifest.max_instructions,
         syscalls: args.syscalls,
+        tohost_addr: None,
         snapshot_dir: args.snapshots.clone(),
     };
     let outcome = rvcore::interp::run(&mut mem, image.entry, &job.input, &cfg);
 
     let status = match &outcome.status {
-        rvcore::ExitStatus::Halted => "halted",
+        rvcore::ExitStatus::Halted | rvcore::ExitStatus::Tohost(_) => "halted",
         rvcore::ExitStatus::InstructionLimit => "instruction_limit",
         rvcore::ExitStatus::Trapped(_) => "trap",
     };

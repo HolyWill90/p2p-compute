@@ -1,10 +1,11 @@
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Conformance differential driver: run the conformance ISA program
 /// under this project's emulator, run the SAME static ELF under
 /// `qemu-riscv64` (an independent implementation), and require
-/// byte-identical syscall output.
+/// byte-identical syscall output. Also tallies the official
+/// riscv-tests suite via the tohost convention.
 #[derive(Parser)]
 enum Cmd {
     /// Execute under our emulator (QEMU-compatible syscall mode) and
@@ -17,27 +18,41 @@ enum Cmd {
     },
     /// Compare two conformance outputs byte for byte.
     Compare { a: PathBuf, b: PathBuf },
+    /// Tally official riscv-tests ELFs via the tohost convention
+    /// (1 = pass). Reports the pass rate and lists failures.
+    Arch { dir: PathBuf },
+}
+
+fn run_elf(elf: &Path) -> Result<rvcore::RunOutcome, String> {
+    let bytes = std::fs::read(elf).map_err(|e| format!("read: {e}"))?;
+    let image = rvcore::elf::parse(&bytes).map_err(|e| format!("elf: {e}"))?;
+    let mut mem = rvcore::Mem::new();
+    rvcore::elf::load(&mut mem, &image).map_err(|e| format!("load: {e}"))?;
+    let cfg = rvcore::Config {
+        syscalls: true,
+        max_instructions: 10_000_000,
+        ..Default::default()
+    };
+    Ok(rvcore::interp::run(&mut mem, image.entry, b"", &cfg))
 }
 
 fn main() {
     match Cmd::parse() {
         Cmd::Emu { elf, out } => {
-            let bytes = std::fs::read(&elf).expect("read elf");
-            let image = rvcore::elf::parse(&bytes).expect("parse elf");
-            let mut mem = rvcore::Mem::new();
-            rvcore::elf::load(&mut mem, &image).expect("load elf");
-            let cfg = rvcore::Config { syscalls: true, ..Default::default() };
-            let outcome = rvcore::interp::run(&mut mem, image.entry, b"", &cfg);
+            let outcome = run_elf(&elf).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            });
+            let status_str = match &outcome.status {
+                rvcore::ExitStatus::Halted | rvcore::ExitStatus::Tohost(_) => "halted",
+                rvcore::ExitStatus::InstructionLimit => "instruction limit",
+                rvcore::ExitStatus::Trapped(t) => {
+                    eprintln!("trap: {t:?}");
+                    std::process::exit(3);
+                }
+            };
             println!(
-                "emulator: {} after {} instructions, {} output bytes",
-                match outcome.status {
-                    rvcore::ExitStatus::Halted => "halted",
-                    rvcore::ExitStatus::InstructionLimit => "instruction limit",
-                    rvcore::ExitStatus::Trapped(t) => {
-                        eprintln!("trap: {t:?}");
-                        std::process::exit(3);
-                    }
-                },
+                "emulator: {status_str} after {} instructions, {} output bytes",
                 outcome.instructions,
                 outcome.syscall_log.len()
             );
@@ -52,13 +67,58 @@ fn main() {
                     a.len()
                 );
             } else {
-                eprintln!("CONFORMANCE FAIL: outputs differ ({} vs {} bytes)", a.len(), b.len());
+                eprintln!(
+                    "CONFORMANCE FAIL: outputs differ ({} vs {} bytes)",
+                    a.len(),
+                    b.len()
+                );
                 for (i, (x, y)) in a.iter().zip(&b).enumerate() {
                     if x != y {
                         eprintln!("  first difference at byte {i}: {x:#x} vs {y:#x}");
                         break;
                     }
                 }
+                std::process::exit(1);
+            }
+        }
+        Cmd::Arch { dir } => {
+            let mut elfs: Vec<PathBuf> = std::fs::read_dir(&dir)
+                .expect("read dir")
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension().map(|e| e == "elf").unwrap_or(false)
+                })
+                .collect();
+            elfs.sort();
+            let mut pass = 0usize;
+            let mut fails: Vec<String> = Vec::new();
+            for elf in &elfs {
+                let name = elf
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                match run_elf(elf) {
+                    Ok(outcome) => match outcome.status {
+                        rvcore::ExitStatus::Tohost(1) => pass += 1,
+                        rvcore::ExitStatus::Tohost(v) => {
+                            fails.push(format!("{name}: tohost {v:#x} (fail code)"));
+                        }
+                        other => fails.push(format!("{name}: {other:?}")),
+                    },
+                    Err(e) => fails.push(format!("{name}: {e}")),
+                }
+            }
+            println!(
+                "riscv-tests: {} / {} passed ({:.0}%)",
+                pass,
+                elfs.len(),
+                100.0 * pass as f64 / elfs.len().max(1) as f64
+            );
+            for f in &fails {
+                println!("  FAIL: {f}");
+            }
+            if pass != elfs.len() {
                 std::process::exit(1);
             }
         }

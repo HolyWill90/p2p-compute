@@ -22,7 +22,7 @@ pub enum Trap {
 /// `-C target-feature=-a`. Compressed 16-bit encodings are decoded by
 /// `step_c` below.
 pub fn step(cpu: &mut Cpu, mem: &mut Mem) -> Result<bool, Trap> {
-    step_mode(cpu, mem, false)
+    step_mode(cpu, mem, false, None)
 }
 
 /// Like [`step`], with the QEMU-compatible syscall environment enabled
@@ -30,7 +30,7 @@ pub fn step(cpu: &mut Cpu, mem: &mut Mem) -> Result<bool, Trap> {
 /// (write=64, exit=93) instead of trapping, so the same static ELF can
 /// run under both this emulator and `qemu-riscv64` for the conformance
 /// differential.
-pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool) -> Result<bool, Trap> {
+pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool, tohost_addr: Option<u64>) -> Result<bool, Trap> {
     let pc = cpu.pc;
     if pc >= ADDR_SPACE {
         return Err(Trap::FetchOutOfRange);
@@ -159,6 +159,9 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool) -> Result<bool, T
                 0b011 => 8,
                 _ => return Err(illegal(pc, inst)),
             };
+            if Some(&addr) == tohost_addr.as_ref() && len == 8 {
+                cpu.tohost = Some(b);
+            }
             let bytes = b.to_le_bytes();
             match mem.write(addr, &bytes[..len]) {
                 Ok(()) => {}
@@ -286,21 +289,67 @@ pub fn step_mode(cpu: &mut Cpu, mem: &mut Mem, syscalls: bool) -> Result<bool, T
             cpu.pc = next_pc;
         }
         0b0001111 => {
-            // FENCE: no-op in the single-hart deterministic model
+            match f3 {
+                0b000 => {} // FENCE: no-op in the single-hart deterministic model
+                0b001 => {} // FENCE.I: no-op (no instruction cache)
+                _ => return Err(illegal(pc, inst)),
+            }
             cpu.pc = next_pc;
         }
         0b1110011 => {
-            if f3 != 0 {
-                return Err(illegal(pc, inst));
-            }
-            match inst >> 20 {
-                0 => {
+            match (f3, inst >> 20) {
+                (0b000, 0) => {
                     if syscalls {
                         return do_syscall(cpu, mem);
                     }
                     return Err(Trap::Ecall);
                 }
-                1 => return Ok(true), // EBREAK: clean halt, pc stays put
+                (0b000, 1) => return Ok(true), // EBREAK: clean halt, pc stays put
+                // Zicsr: a minimal machine-mode CSR model. mtvec/mepc/
+                // mcause/mstatus are architectural (hashed); unknown
+                // CSRs read as zero and ignore writes — deterministic
+                // and sufficient for the riscv-tests' mtvec/mepc/
+                // mcause setup.
+                (0b001, _) | (0b010, _) | (0b011, _) | (0b101, _) | (0b110, _) | (0b111, _) => {
+                    let csr_num = inst >> 20;
+                    // Source: rs1 for register forms, the sign-extended
+                    // 5-bit zimm (rs1 field) for immediate forms.
+                    let src = match f3 {
+                        0b001 | 0b010 | 0b011 => a,
+                        _ => {
+                            let z = (inst >> 15) & 0x1f;
+                            if z & 0x10 != 0 {
+                                (z as u64) - 0x10 // sext5
+                            } else {
+                                z as u64
+                            }
+                        }
+                    };
+                    let old = match csr_num {
+                        0x300 => cpu.mstatus,
+                        0x305 => cpu.mtvec,
+                        0x341 => cpu.mepc,
+                        0x342 => cpu.mcause,
+                        _ => 0,
+                    };
+                    let new = match f3 {
+                        0b001 | 0b101 => src,        // csrrw(i)
+                        0b010 | 0b110 => old | src,  // csrrs(i)
+                        0b011 | 0b111 => old & !src, // csrrc(i)
+                        _ => unreachable!(),
+                    };
+                    match csr_num {
+                        0x300 => cpu.mstatus = new,
+                        0x305 => cpu.mtvec = new & !0x3, // direct-mode base
+                        0x341 => cpu.mepc = new,
+                        0x342 => cpu.mcause = new,
+                        _ => {}
+                    }
+                    if rd != 0 {
+                        cpu.set(rd, old);
+                    }
+                    cpu.pc = next_pc;
+                }
                 _ => return Err(illegal(pc, inst)),
             }
         }
@@ -735,6 +784,9 @@ fn trap_store(e: crate::mem::MemError, addr: u64) -> Trap {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitStatus {
     Halted,
+    /// The guest wrote its exit code to the tohost device
+    /// (riscv-tests convention: 1 = pass).
+    Tohost(u64),
     InstructionLimit,
     Trapped(Trap),
 }
@@ -770,6 +822,9 @@ pub struct Config {
     /// `<dir>/snap-<chain index>.bin` at every chunk boundary and at
     /// exit. Snapshots power the dispute fast path.
     pub snapshot_dir: Option<std::path::PathBuf>,
+    /// When set, a store to this address ends the run with the stored
+    /// value (riscv-tests tohost convention).
+    pub tohost_addr: Option<u64>,
 }
 
 impl Default for Config {
@@ -779,6 +834,7 @@ impl Default for Config {
             max_instructions: 4_000_000_000,
             syscalls: false,
             snapshot_dir: None,
+            tohost_addr: None,
         }
     }
 }
@@ -806,8 +862,16 @@ pub fn run(mem: &mut Mem, entry: u64, input: &[u8], cfg: &Config) -> RunOutcome 
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    let trace_first: usize = std::env::var("RVCORE_TRACE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     loop {
+        if trace_first > 0 && (n as usize) < trace_first {
+            eprintln!("[trace] pc={:#x} inst={:#010x} mtvec={:#x}", cpu.pc,
+                mem.read(cpu.pc, 4).unwrap_or(0), cpu.mtvec);
+        }
         if progress_every > 0 && n % progress_every == 0 && n > 0 {
             eprintln!("[rvcore] pc {:#x} inst {}", cpu.pc, n);
         }
@@ -815,9 +879,10 @@ pub fn run(mem: &mut Mem, entry: u64, input: &[u8], cfg: &Config) -> RunOutcome 
             push_hash(&mut prev, &cpu, mem, &mut chain);
             break;
         }
-        let step_res = step_mode(&mut cpu, mem, cfg.syscalls);
+        let step_res = step_mode(&mut cpu, mem, cfg.syscalls, cfg.tohost_addr);
         // Snapshot before the hash is pushed: the snapshot's chain
         // index is chain.len() (the index it is about to get).
+        let step_res = step_res;
         let mut snap = None;
         if cfg.snapshot_dir.is_some() {
             let at_boundary = match step_res {
@@ -829,27 +894,58 @@ pub fn run(mem: &mut Mem, entry: u64, input: &[u8], cfg: &Config) -> RunOutcome 
             }
         }
         match step_res {
-            Ok(true) => {
-                n += 1;
-                write_snapshot(cfg, chain.len(), &snap);
-                push_hash(&mut prev, &cpu, mem, &mut chain);
-                status = ExitStatus::Halted;
-                break;
-            }
-            Ok(false) => {
-                n += 1;
-                in_chunk += 1;
-                if in_chunk == cfg.chunk_size {
-                    write_snapshot(cfg, chain.len(), &snap);
+            step_out => {
+                // The tohost device is checked after every step: a
+                // store to the tohost address ends the run (riscv-tests
+                // convention: value 1 = pass).
+                if cfg.tohost_addr.is_some() && cpu.tohost.is_some() {
                     push_hash(&mut prev, &cpu, mem, &mut chain);
-                    in_chunk = 0;
+                    status = ExitStatus::Tohost(cpu.tohost.unwrap_or(0));
+                    break;
                 }
-            }
-            Err(t) => {
-                write_snapshot(cfg, chain.len(), &snap);
-                push_hash(&mut prev, &cpu, mem, &mut chain);
-                status = ExitStatus::Trapped(t);
-                break;
+                match step_out {
+                    Ok(true) => {
+                        n += 1;
+                        write_snapshot(cfg, chain.len(), &snap);
+                        push_hash(&mut prev, &cpu, mem, &mut chain);
+                        status = ExitStatus::Halted;
+                        break;
+                    }
+                    Ok(false) => {
+                        n += 1;
+                        in_chunk += 1;
+                        if in_chunk == cfg.chunk_size {
+                            write_snapshot(cfg, chain.len(), &snap);
+                            push_hash(&mut prev, &cpu, mem, &mut chain);
+                            in_chunk = 0;
+                        }
+                    }
+                    Err(t) => {
+                        // Route the trap to the handler the guest installed
+                        // via csrw mtvec (riscv-tests convention). mcause is
+                        // the trap cause; mepc the trapping pc.
+                        if cpu.mtvec != 0 {
+                            cpu.mcause = match t {
+                                Trap::IllegalInstruction { .. } => 2,
+                                Trap::MisalignedLoad { .. } => 4,
+                                Trap::LoadOutOfRange { .. } => 5,
+                                Trap::MisalignedStore { .. } => 6,
+                                Trap::StoreOutOfRange { .. } => 7,
+                                Trap::Ecall => 8,
+                                _ => 0,
+                            };
+                            cpu.mepc = cpu.pc;
+                            cpu.pc = cpu.mtvec & !0x3;
+                            n += 1;
+                            in_chunk += 1;
+                            continue; // the handler runs; tohost decides pass/fail
+                        }
+                        write_snapshot(cfg, chain.len(), &snap);
+                        push_hash(&mut prev, &cpu, mem, &mut chain);
+                        status = ExitStatus::Trapped(t);
+                        break;
+                    }
+                }
             }
         }
     }

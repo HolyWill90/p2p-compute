@@ -156,8 +156,12 @@ Stated as tests (`crates/coordinator/tests/collusion.rs`), not prose claims:
   the dividend instead of all-ones, REMUW/REMW by zero returned the full
   register instead of the sign-extended 32-bit dividend, and the Q1
   f3=100 group ignored bit12, decoding C.SUBW/C.ADDW as C.SUB/C.XOR.
-  Each has a dedicated regression test; the official riscv-arch-test
-  suite remains the exhaustive form.
+  Each has a dedicated regression test. The official riscv-tests suite
+  (rv64ui/um/uc-p-*) is built in Docker and runs through the emulator;
+  WIP: the test binaries need the standard riscv-test-env linker flow
+  (the hand-rolled link script creates alignment gaps that the pc falls
+  into). The conformance runner (`conformance arch`) tallies tohost
+  pass/fail per test.
 - **Honest scope notes**: bond "slashing" is JSON ledger bookkeeping, not
   on-chain escrow; random sampling is unbiased but the reserve pool is
   only as Sybil-resistant as worker identities (keypairs, not stake).

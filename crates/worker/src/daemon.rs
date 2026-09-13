@@ -424,7 +424,7 @@ fn session_once(
                     "[{}] executed: {} after {} instructions",
                     cfg.worker_id,
                     match &outcome.status {
-                        rvcore::ExitStatus::Halted => "halted".to_string(),
+                        rvcore::ExitStatus::Halted | rvcore::ExitStatus::Tohost(_) => "halted".to_string(),
                         rvcore::ExitStatus::InstructionLimit => "limit".to_string(),
                         rvcore::ExitStatus::Trapped(t) => format!("trap {t:?}"),
                     },
@@ -432,7 +432,7 @@ fn session_once(
                 );
 
                 let status = match &outcome.status {
-                    rvcore::ExitStatus::Halted => "halted",
+                    rvcore::ExitStatus::Halted | rvcore::ExitStatus::Tohost(_) => "halted",
                     rvcore::ExitStatus::InstructionLimit => "instruction_limit",
                     rvcore::ExitStatus::Trapped(_) => "trap",
                 };

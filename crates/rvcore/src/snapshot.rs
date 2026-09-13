@@ -17,13 +17,17 @@ pub const MAGIC: &[u8; 4] = b"RVS1";
 
 pub fn capture(cpu: &Cpu, mem: &Mem) -> Vec<u8> {
     let pages = mem.allocated_pages();
-    let mut out = Vec::with_capacity(8 + 32 * 8 + 8 + pages * (4 + PAGE_SIZE));
+    let mut out = Vec::with_capacity(8 + 32 * 8 + 8 + 4 * 8 + pages * (4 + PAGE_SIZE));
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&(pages as u32).to_le_bytes());
     for r in &cpu.x {
         out.extend_from_slice(&r.to_le_bytes());
     }
     out.extend_from_slice(&cpu.pc.to_le_bytes());
+    out.extend_from_slice(&cpu.mtvec.to_le_bytes());
+    out.extend_from_slice(&cpu.mepc.to_le_bytes());
+    out.extend_from_slice(&cpu.mcause.to_le_bytes());
+    out.extend_from_slice(&cpu.mstatus.to_le_bytes());
     for (idx, page) in mem.page_iter() {
         out.extend_from_slice(&idx.to_le_bytes());
         out.extend_from_slice(page.as_slice());
@@ -32,7 +36,7 @@ pub fn capture(cpu: &Cpu, mem: &Mem) -> Vec<u8> {
 }
 
 pub fn restore(bytes: &[u8]) -> Result<(Cpu, Mem), String> {
-    if bytes.len() < 8 + 32 * 8 + 8 {
+    if bytes.len() < 8 + 32 * 8 + 8 + 4 * 8 {
         return Err("snapshot: too short".into());
     }
     if &bytes[0..4] != MAGIC {
@@ -46,9 +50,24 @@ pub fn restore(bytes: &[u8]) -> Result<(Cpu, Mem), String> {
     }
     let pc_off = 8 + 32 * 8;
     let pc = u64le(pc_off);
-    let cpu = Cpu { x, pc };
+    // Machine CSRs (mtvec/mepc/mcause/mstatus) are architectural state
+    // and ride along in the snapshot.
+    let mut csr = [0u64; 4];
+    for (i, r) in csr.iter_mut().enumerate() {
+        *r = u64le(pc_off + 8 + i * 8);
+    }
+    let cpu = Cpu {
+        x,
+        pc,
+        mtvec: csr[0],
+        mepc: csr[1],
+        mcause: csr[2],
+        mstatus: csr[3],
+        tohost: None,
+    };
     let mut mem = Mem::new();
-    let mut off = pc_off + 8;
+    // Skip pc + the 4 machine CSRs written after it.
+    let mut off = pc_off + 8 + 32;
     for _ in 0..page_count {
         if off + 4 + PAGE_SIZE > bytes.len() {
             return Err("snapshot: truncated page data".into());

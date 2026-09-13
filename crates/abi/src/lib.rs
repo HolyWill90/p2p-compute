@@ -32,3 +32,9 @@ pub const STACK_TOP: u64 = 0x83F0_0000;
 /// `riscv64imac-unknown-none-elf` target with `-a` so no lr/sc is
 /// emitted; compressed instructions are fine.
 pub const ISA: &str = "rv64imc";
+
+/// Pinned address of the `tohost` symbol for the classic riscv-tests
+/// suite: a test writes (payload << 1) | 1 here to exit; payload 1 =
+/// pass, anything else = fail. The test link script pins the .tohost
+/// section at this address.
+pub const TOHOST_ADDR: u64 = 0x8001_0000;

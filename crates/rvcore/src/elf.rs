@@ -10,6 +10,9 @@ pub struct ElfImage {
     /// (vaddr, bytes) for each PT_LOAD segment; memsz > filesz implies
     /// zero-filled BSS tail.
     pub segments: Vec<(u64, Vec<u8>)>,
+    /// Address of the `tohost` symbol, parsed from the section headers
+    /// (.tohost section). None if the ELF has no tohost.
+    pub tohost_addr: Option<u64>,
 }
 
 const PT_LOAD: u32 = 1;
@@ -40,6 +43,11 @@ pub fn parse(bytes: &[u8]) -> Result<ElfImage, String> {
         return Err("elf: not a static executable".into());
     }
     let entry = u64le(0x18);
+    let e_shoff = u64le(0x28);
+    let e_shentsize = u16le(0x3a) as usize;
+    let e_shnum = u16le(0x3c) as usize;
+    let e_shstrndx = u16le(0x3e) as usize;
+    let tohost_addr = find_tohost_section(bytes, e_shoff as usize, e_shentsize, e_shnum, e_shstrndx);
     let phoff = u64le(0x20);
     let phentsize = u16le(0x36) as usize;
     let phnum = u16le(0x38) as usize;
@@ -74,7 +82,43 @@ pub fn parse(bytes: &[u8]) -> Result<ElfImage, String> {
     if segments.is_empty() {
         return Err("elf: no PT_LOAD segments".into());
     }
-    Ok(ElfImage { entry, segments })
+    Ok(ElfImage { entry, segments, tohost_addr })
+}
+
+/// Scan section headers for `.tohost` and return its virtual address.
+fn find_tohost_section(
+    data: &[u8],
+    shoff: usize,
+    shentsize: usize,
+    shnum: usize,
+    shstrndx: usize,
+) -> Option<u64> {
+    if shoff == 0 || shnum == 0 {
+        return None;
+    }
+    let shstr_offset = u64::from_le_bytes(
+        data.get(shoff + shstrndx * shentsize + 24..)?.try_into().ok()?,
+    ) as usize;
+    for i in 0..shnum {
+        let base = shoff + i * shentsize;
+        if base + 64 > data.len() {
+            break;
+        }
+        let sec_name = u32::from_le_bytes(data.get(base..base + 4)?.try_into().ok()?);
+        let sec_type = u32::from_le_bytes(data.get(base + 4..base + 8)?.try_into().ok()?);
+        let sec_addr = u64::from_le_bytes(data.get(base + 16..base + 24)?.try_into().ok()?);
+        if sec_type != 1 {
+            continue;
+        }
+        let name_start = shstr_offset + sec_name as usize;
+        let name_end = data[name_start..].iter().position(|&b| b == 0)
+            .map(|p| name_start + p)
+            .unwrap_or(name_start);
+        if &data[name_start..name_end] == b".tohost" {
+            return Some(sec_addr);
+        }
+    }
+    None
 }
 
 /// Place the image into memory.
