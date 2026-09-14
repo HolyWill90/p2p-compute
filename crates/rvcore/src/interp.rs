@@ -873,20 +873,31 @@ pub fn run(mem: &mut Mem, entry: u64, input: &[u8], cfg: &Config) -> RunOutcome 
     let mut in_chunk: u64 = 0;
     let mut status = ExitStatus::InstructionLimit;
     // Progress telemetry for hung-run diagnosis (off unless requested).
+    // Env-var tracing is host-side only: a zkVM guest has no
+    // environment, and the syscalls do not exist there.
+    #[cfg(feature = "env-tracing")]
     let progress_every: u64 = std::env::var("RVCORE_PROGRESS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    #[cfg(not(feature = "env-tracing"))]
+    let progress_every: u64 = 0;
+    #[cfg(feature = "env-tracing")]
     let trace_first: usize = std::env::var("RVCORE_TRACE")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    // Optional window start: trace instructions [from, from + trace_first)
-    // instead of [0, trace_first) — debugging a loop needs its middle.
+    #[cfg(not(feature = "env-tracing"))]
+    let trace_first: usize = 0;
+    #[cfg(feature = "env-tracing")]
     let trace_from: usize = std::env::var("RVCORE_TRACE_FROM")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    #[cfg(not(feature = "env-tracing"))]
+    let trace_from: usize = 0;
+    // Optional window start: trace instructions [from, from + trace_first)
+    // instead of [0, trace_first) — debugging a loop needs its middle.
 
     loop {
         let tracing = trace_first > 0

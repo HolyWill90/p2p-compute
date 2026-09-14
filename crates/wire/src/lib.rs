@@ -153,8 +153,9 @@ pub enum ClientToServer {
         /// When set, the daemon serves blobs to peers on this port.
         listen_port: Option<u16>,
     },
-    /// Signature over the nonce bytes the server issued.
-    NonceSignature { sig_hex: String },
+    /// Signature over the nonce bytes (when the worker has an
+    /// identity) plus the admission proof-of-work counter.
+    NonceSignature { sig_hex: Option<String>, pow_counter: u64 },
     /// Fetch a content-store blob by hash (the torrent layer online).
     BlobRequest { id_hex: String },
     /// A completed, signed execution result.
@@ -165,7 +166,9 @@ pub enum ClientToServer {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ServerToClient {
     /// Random bytes: sign these to prove possession of the Hello key.
-    Nonce { hex: String },
+    /// `pow_bits` is the admission proof-of-work difficulty the client
+    /// must meet before authentication.
+    Nonce { hex: String, pow_bits: u32 },
     /// Identity verified; the server assigned this worker id.
     AuthOk { worker_id: String },
     AuthFailed { reason: String },
@@ -202,4 +205,69 @@ pub use content_descriptor::JobDescriptor;
 /// contentstore; wire depends on it for the protocol.
 pub mod content_descriptor {
     pub use contentstore::JobDescriptor;
+}
+
+
+/// Admission proof-of-work: find `counter` such that
+/// BLAKE3(nonce || counter_le) has at least `bits` leading zero bits.
+/// This is the cost of joining: a slashed or banned identity pays it
+/// again on every new connection, which is what makes identity-based
+/// bookkeeping bite. Expected work is 2^bits hashes.
+pub fn mine_pow(nonce: &[u8], bits: u32) -> u64 {
+    let mut counter: u64 = 0;
+    loop {
+        if verify_pow(nonce, counter, bits) {
+            return counter;
+        }
+        counter += 1;
+    }
+}
+
+/// Verify an admission proof-of-work solution.
+pub fn verify_pow(nonce: &[u8], counter: u64, bits: u32) -> bool {
+    let bits = bits.min(256);
+    let mut h = blake3::Hasher::new();
+    h.update(nonce);
+    h.update(&counter.to_le_bytes());
+    let digest = h.finalize();
+    leading_zero_bits(digest.as_bytes()) >= bits
+}
+
+fn leading_zero_bits(bytes: &[u8]) -> u32 {
+    let mut n = 0u32;
+    for &b in bytes {
+        if b == 0 {
+            n += 8;
+        } else {
+            n += b.leading_zeros();
+            break;
+        }
+    }
+    n
+}
+
+
+#[cfg(test)]
+mod pow_tests {
+    use super::*;
+
+    #[test]
+    fn mine_then_verify_roundtrips() {
+        let nonce = [7u8; 32];
+        let counter = mine_pow(&nonce, 12);
+        assert!(verify_pow(&nonce, counter, 12));
+        assert!(!verify_pow(&nonce, counter.wrapping_add(1), 12));
+    }
+
+    #[test]
+    fn zero_bits_always_passes() {
+        assert!(verify_pow(&[0u8; 32], 0, 0));
+        assert!(mine_pow(&[1u8; 32], 0) == 0);
+    }
+
+    #[test]
+    fn different_nonce_invalidates_solution() {
+        let counter = mine_pow(&[2u8; 32], 8);
+        assert!(!verify_pow(&[3u8; 32], counter, 8));
+    }
 }

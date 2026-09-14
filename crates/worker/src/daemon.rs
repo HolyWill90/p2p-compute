@@ -322,21 +322,34 @@ fn session_once(
         },
     )
     .map_err(|e| e.to_string())?;
-    let nonce = match wire::receive::<ServerToClient>(&mut stream).map_err(|e| e.to_string())? {
-        ServerToClient::Nonce { hex } => hex,
-        ServerToClient::AuthFailed { reason } => return Err(format!("auth failed: {reason}")),
-        other => return Err(format!("expected Nonce, got {other:?}")),
-    };
-    if let Some(key) = &signing_key {
-        let nonce_bytes = hex_decode(&nonce).ok_or("nonce: bad hex")?;
-        wire::send(
-            &mut stream,
-            &ClientToServer::NonceSignature {
-                sig_hex: hex(&key.sign(&nonce_bytes).to_bytes()),
-            },
-        )
-        .map_err(|e| e.to_string())?;
+    let (nonce, pow_bits) =
+        match wire::receive::<ServerToClient>(&mut stream).map_err(|e| e.to_string())? {
+            ServerToClient::Nonce { hex, pow_bits } => (hex, pow_bits),
+            ServerToClient::AuthFailed { reason } => {
+                return Err(format!("auth failed: {reason}"))
+            }
+            other => return Err(format!("expected Nonce, got {other:?}")),
+        };
+    let nonce_bytes = hex_decode(&nonce).ok_or("nonce: bad hex")?;
+    // Admission proof-of-work: the server's fresh nonce makes this
+    // cost per-connection, which is what a ban or slash re-charges.
+    let pow_counter = wire::mine_pow(&nonce_bytes, pow_bits);
+    if pow_bits > 0 {
+        println!(
+            "[{}] admission PoW mined: {pow_bits} bits",
+            cfg.worker_id
+        );
     }
+    wire::send(
+        &mut stream,
+        &ClientToServer::NonceSignature {
+            sig_hex: signing_key
+                .as_ref()
+                .map(|key| hex(&key.sign(&nonce_bytes).to_bytes())),
+            pow_counter,
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
     // 2. Job loop — the session persists across many jobs.
     let store = contentstore::Store::open(&cfg.store_dir).map_err(|e| e.to_string())?;

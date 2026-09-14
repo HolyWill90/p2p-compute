@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "abi"
+version = "0.1.0"
+
+[[package]]
 name = "addchain"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1730,6 +1734,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jobfmt"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3108,6 +3121,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvcore"
+version = "0.1.0"
+dependencies = [
+ "abi",
+ "blake3",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3956,6 +3977,9 @@ dependencies = [
 name = "sp1-host"
 version = "0.1.0"
 dependencies = [
+ "jobfmt",
+ "rvcore",
+ "serde_json",
  "sp1-build",
  "sp1-sdk",
 ]

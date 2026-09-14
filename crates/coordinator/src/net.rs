@@ -29,6 +29,11 @@ pub struct ServeConfig {
     pub per_job_deadline: Duration,
     pub ledger: Option<PathBuf>,
     pub require_identity: bool,
+    /// Admission proof-of-work difficulty in leading-zero bits (0
+    /// disables). The fresh per-connection nonce forces the work to be
+    /// redone on every reconnect, which is what makes bans and
+    /// slashing bite: returning after a ban costs the mining again.
+    pub identity_pow_bits: u32,
     /// When set, an "all workers" job waits for this many
     /// authenticated workers before dispatching.
     pub pool: Option<usize>,
@@ -69,7 +74,7 @@ enum Event {
         worker_id: String,
         listen_port: Option<u16>,
     },
-    NonceSig { conn: usize, sig: String },
+    NonceSig { conn: usize, sig: Option<String>, pow_counter: u64 },
     BlobRequest { conn: usize, id: String },
     Result { conn: usize, result: WorkerResult },
     Closed { conn: usize },
@@ -476,6 +481,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
             Event::Hello { conn, pubkey, worker_id, listen_port } => {
                 let nonce: [u8; 32] = rand_nonce();
                 let nonce_hex = hex(&nonce);
+                let pow_bits = cfg.identity_pow_bits;
                 let mut map = conns.lock().unwrap();
                 if let Some(c) = map.get_mut(&conn) {
                     c.pubkey = if pubkey.is_empty() { None } else { Some(pubkey) };
@@ -486,17 +492,37 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                     if let Some(port) = listen_port {
                         c.peer_addr = Some(format!("{}:{port}", c.peer_ip));
                     }
-                    let _ = c.outbound.send(ServerToClient::Nonce { hex: nonce_hex });
+                    let _ = c
+                        .outbound
+                        .send(ServerToClient::Nonce { hex: nonce_hex, pow_bits });
                 }
             }
-            Event::NonceSig { conn, sig } => {
+            Event::NonceSig { conn, sig, pow_counter } => {
                 let mut map = conns.lock().unwrap();
                 let Some(c) = map.get_mut(&conn) else { continue };
-                let auth_ok = match (&c.pubkey, &c.nonce) {
-                    (Some(pk), Some(nonce)) => verify_nonce(pk, nonce, &sig).is_ok(),
-                    (None, _) => !cfg.require_identity,
+                // Admission proof-of-work: the fresh per-connection
+                // nonce forces the work to be redone every time, so a
+                // slashed or banned identity cannot return for free.
+                let pow_ok = match (&c.nonce, cfg.identity_pow_bits) {
+                    (Some(nonce), bits) => {
+                        wire::verify_pow(nonce, pow_counter, bits)
+                    }
                     _ => false,
                 };
+                if !pow_ok {
+                    eprintln!(
+                        "SECURITY: connection {conn} failed admission proof-of-work ({} bits)",
+                        cfg.identity_pow_bits
+                    );
+                }
+                let auth_ok = pow_ok
+                    && match (&c.pubkey, &sig, &c.nonce) {
+                        (Some(pk), Some(sig), Some(nonce)) => {
+                            verify_nonce(pk, nonce, sig).is_ok()
+                        }
+                        (None, _, Some(_)) => !cfg.require_identity,
+                        _ => false,
+                    };
                 if auth_ok {
                     c.authed = true;
                     let wid = c.worker_id.clone();
@@ -771,8 +797,8 @@ fn session_loop(
                 tx.send(Event::Hello { conn, pubkey: pubkey_hex, worker_id, listen_port })
                     .ok();
             }
-            Ok(Some(ClientToServer::NonceSignature { sig_hex })) => {
-                tx.send(Event::NonceSig { conn, sig: sig_hex }).ok();
+            Ok(Some(ClientToServer::NonceSignature { sig_hex, pow_counter })) => {
+                tx.send(Event::NonceSig { conn, sig: sig_hex, pow_counter }).ok();
             }
             Ok(Some(ClientToServer::BlobRequest { id_hex })) => {
                 tx.send(Event::BlobRequest { conn, id: id_hex }).ok();

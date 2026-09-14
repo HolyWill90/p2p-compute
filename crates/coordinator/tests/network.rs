@@ -65,6 +65,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
         per_job_deadline: std::time::Duration::from_secs(90),
         ledger: Some(root.join("ledger.json")),
         require_identity: true,
+        identity_pow_bits: 0,
         round1_ids: None,
         pool: Some(2),
         round1_size: None,
@@ -232,6 +233,7 @@ fn tls_network_session() {
         per_job_deadline: std::time::Duration::from_secs(90),
         ledger: Some(root.join("ledger.json")),
         require_identity: true,
+        identity_pow_bits: 0,
         round1_ids: None,
         pool: Some(2),
         round1_size: None,
@@ -334,6 +336,7 @@ fn reserve_escalation_beats_lying_worker() {
         per_job_deadline: std::time::Duration::from_secs(90),
         ledger: Some(root.join("ledger.json")),
         require_identity: true,
+        identity_pow_bits: 0,
         pool: Some(3),
         round1_size: None,
         round1_ids: Some(vec!["wA".into(), "wB".into()]),
@@ -417,6 +420,7 @@ fn partial_descriptor_write_does_not_kill_server() {
         per_job_deadline: std::time::Duration::from_secs(90),
         ledger: None,
         require_identity: true,
+        identity_pow_bits: 0,
         pool: Some(1),
         round1_size: None,
         round1_ids: None,
@@ -491,14 +495,17 @@ impl RawClient {
         .unwrap();
         loop {
             match wire::receive::<ServerToClient>(&mut stream).unwrap() {
-                ServerToClient::Nonce { hex: nonce } => {
+                ServerToClient::Nonce { hex: nonce, pow_bits } => {
                     // The coordinator verifies over the RAW nonce bytes.
                     let nonce_bytes =
                         jobfmt::from_hex(&nonce, nonce.len() / 2).unwrap();
                     let sig = key.sign(&nonce_bytes);
                     wire::send(
                         &mut stream,
-                        &ClientToServer::NonceSignature { sig_hex: hex(&sig.to_bytes()) },
+                        &ClientToServer::NonceSignature {
+                            sig_hex: Some(hex(&sig.to_bytes())),
+                            pow_counter: wire::mine_pow(&nonce_bytes, pow_bits),
+                        },
                     )
                     .unwrap();
                 }
@@ -556,6 +563,7 @@ fn net_security_cfg(
         per_job_deadline: std::time::Duration::from_secs(90),
         ledger: None,
         require_identity: true,
+        identity_pow_bits: 8,
         pool: Some(pool),
         round1_size: None,
         round1_ids: Some(round1),

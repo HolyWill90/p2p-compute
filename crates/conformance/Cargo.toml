@@ -4,5 +4,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rvcore = { workspace = true }
+rvcore = { workspace = true, features = ["env-tracing"] }
 clap = { workspace = true }

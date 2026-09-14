@@ -6,3 +6,8 @@ edition.workspace = true
 [dependencies]
 abi = { workspace = true }
 blake3 = { workspace = true }
+
+[features]
+# Tracing reads process env vars; guests (zkVM programs) must not, so
+# the feature is opt-in for host-side debugging tools.
+env-tracing = []

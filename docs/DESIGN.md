@@ -72,6 +72,18 @@ Build the substrate first; the tiers plug into it.
     job's staged artifact, so cross-platform comparison only covered
     the one-chunk smoke run. difftest takes `--out-prefix` and both
     jobs are staged and compared per job across all platforms.
+- **Identity cost — admission proof-of-work**: keypairs are free, so
+  "slashing" could not bite: a banned identity returned with a fresh
+  key. Authentication now requires mining
+  `BLAKE3(nonce || counter)` to `--identity-pow-bits` leading zero
+  bits, where `nonce` is the coordinator's fresh per-connection
+  challenge — the work cannot be precomputed or reused, so every
+  connection (and therefore every identity after a ban) pays
+  approximately `2^bits` hashes. The difficulty is the economic dial;
+  20 bits is ~0.1s per connection, and a production deployment raises
+  it to whatever a return-after-ban should cost. This makes the
+  sampling argument (collusion probability f^N) bind against real
+  cost instead of free keypairs; it is still not stake.
 
 ### 2. Verification tiers (routing by job value)
 

@@ -164,6 +164,12 @@ struct ServeArgs {
     /// overriding --sample-size.
     #[arg(long)]
     round1_ids: Option<String>,
+    /// Admission proof-of-work difficulty (leading zero bits). Every
+    /// connection must mine this before authentication, so a slashed
+    /// or banned identity pays to return. 0 disables (default 20,
+    /// roughly a tenth of a second of hashing per connection).
+    #[arg(long, default_value_t = 20)]
+    identity_pow_bits: u32,
     #[arg(long)]
     store: PathBuf,
     #[arg(long)]
@@ -206,6 +212,7 @@ fn cmd_serve(args: ServeArgs) {
         per_job_deadline: std::time::Duration::from_secs(args.per_job_deadline_secs),
         ledger: args.ledger,
         require_identity: true,
+        identity_pow_bits: args.identity_pow_bits,
         pool: Some(args.pool),
         round1_size: args.sample_size,
         round1_ids: args

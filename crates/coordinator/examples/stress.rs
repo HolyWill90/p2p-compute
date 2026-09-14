@@ -36,6 +36,7 @@ fn main() {
         per_job_deadline: std::time::Duration::from_secs(60),
         ledger: None,
         require_identity: true,
+        identity_pow_bits: 0,
         round1_ids: None,
         pool: Some(2),
         round1_size: None,
