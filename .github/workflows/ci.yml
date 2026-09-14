@@ -150,7 +150,7 @@ jobs:
           cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash-nano/program.elf
       - name: Verify the committed nano receipt
         working-directory: sp1-host
-        run: cargo run --release --bin emu -- verify ../jobs/demo-hash-nano sp1-artifacts/nano-receipt.bin sp1-artifacts/sp1-guest-emu.elf
+        run: cargo run --release --bin emu -- verify ../jobs/demo-hash-nano ../sp1-artifacts/nano-receipt.bin ../sp1-artifacts/sp1-guest-emu.elf
 
   coverage:
     # Line-coverage floor over the verification-critical crates, so
