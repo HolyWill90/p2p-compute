@@ -60,6 +60,43 @@ fn main() {
         hex(&chain.last().copied().unwrap_or_default()),
     );
 
+    if mode == "verify" {
+        // CI mode: no proving. Load the committed receipt, re-derive
+        // the verifying key from the committed guest ELF (binding the
+        // receipt to that exact binary), cryptographically verify it,
+        // and require the committed values to equal the local rvcore
+        // run. This is how CI checks the zk tier without a prover.
+        let receipt_path = std::env::args()
+            .nth(3)
+            .unwrap_or_else(|| "../sp1-artifacts/nano-receipt.bin".into());
+        let guest_path = std::env::args()
+            .nth(4)
+            .unwrap_or_else(|| "../sp1-artifacts/sp1-guest-emu.elf".into());
+        let mut proof =
+            sp1_sdk::SP1ProofWithPublicValues::load(&receipt_path).expect("load receipt");
+        let guest_bytes = std::fs::read(&guest_path).expect("load committed guest ELF");
+        let prover = ProverClient::builder().cpu().build();
+        let pk = prover
+            .setup(Elf::Dynamic(guest_bytes.into()))
+            .expect("setup from committed guest ELF");
+        let status_zk: u32 = proof.public_values.read();
+        let instructions_zk: u64 = proof.public_values.read();
+        let chain_zk: Vec<[u8; 32]> = proof.public_values.read();
+        let output_zk: Vec<u8> = proof.public_values.read();
+        assert_eq!(status_zk, status, "status mismatch");
+        assert_eq!(instructions_zk, instructions, "instruction count mismatch");
+        assert_eq!(chain_zk, chain, "chunk chain mismatch");
+        assert_eq!(output_zk, output, "output mismatch");
+        prover.verify(&proof, &pk.verifying_key(), None).expect("receipt verification");
+        println!(
+            "SP1 EMU RECEIPT VERIFY PASS: committed receipt verified against the committed guest ELF - {} produced {} ({} instruction(s))",
+            job_dir,
+            hex(&chain_zk.last().copied().unwrap_or_default()),
+            instructions_zk,
+        );
+        return;
+    }
+
     let guest_bytes = std::fs::read("../elf/sp1-guest-emu").expect("guest ELF (build sp1-guest first)");
     let elf = Elf::Dynamic(guest_bytes.into());
     let prover = ProverClient::builder().cpu().build();
@@ -81,42 +118,6 @@ fn main() {
         assert_eq!(chain_zk, chain, "chunk chain mismatch");
         assert_eq!(output_zk, output, "output mismatch");
         println!("SP1 EMU EXECUTE PASS: same-ELF execution matches local rvcore ({} chunk(s))", chain_zk.len());
-        return;
-    }
-
-    if mode == "verify" {
-        // CI mode: no proving. Load the committed receipt, re-derive
-        // the verifying key from the committed guest ELF (binding the
-        // receipt to that exact binary), cryptographically verify it,
-        // and require the committed values to equal the local rvcore
-        // run. This is how CI checks the zk tier without a prover.
-        let receipt_path = std::env::args()
-            .nth(3)
-            .unwrap_or_else(|| "../sp1-artifacts/nano-receipt.bin".into());
-        let guest_path = std::env::args()
-            .nth(4)
-            .unwrap_or_else(|| "../sp1-artifacts/sp1-guest-emu.elf".into());
-        let mut proof =
-            sp1_sdk::SP1ProofWithPublicValues::load(&receipt_path).expect("load receipt");
-        let guest_bytes = std::fs::read(&guest_path).expect("load committed guest ELF");
-        let pk = prover
-            .setup(Elf::Dynamic(guest_bytes.into()))
-            .expect("setup from committed guest ELF");
-        let status_zk: u32 = proof.public_values.read();
-        let instructions_zk: u64 = proof.public_values.read();
-        let chain_zk: Vec<[u8; 32]> = proof.public_values.read();
-        let output_zk: Vec<u8> = proof.public_values.read();
-        assert_eq!(status_zk, status, "status mismatch");
-        assert_eq!(instructions_zk, instructions, "instruction count mismatch");
-        assert_eq!(chain_zk, chain, "chunk chain mismatch");
-        assert_eq!(output_zk, output, "output mismatch");
-        prover.verify(&proof, &pk.verifying_key(), None).expect("receipt verification");
-        println!(
-            "SP1 EMU RECEIPT VERIFY PASS: committed receipt verified against the committed guest ELF - {} produced {} ({} instruction(s))",
-            job_dir,
-            hex(&chain_zk.last().copied().unwrap_or_default()),
-            instructions_zk,
-        );
         return;
     }
 
