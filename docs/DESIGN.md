@@ -72,25 +72,27 @@ Build the substrate first; the tiers plug into it.
     job's staged artifact, so cross-platform comparison only covered
     the one-chunk smoke run. difftest takes `--out-prefix` and both
     jobs are staged and compared per job across all platforms.
-- **zk tier, same-ELF edition (2026-09-14)**: the earlier zk claim was
-  same-ALGORITHM only (an SP1 guest reimplementing demo-hash's FNV
-  streams). The guest is now the actual emulator: `sp1-guest-emu`
-  compiles rvcore itself into the zkVM and executes the actual job ELF
-  with the actual input, committing status, instruction count, the
-  full chunk chain, and output. `sp1-host emu` (execute mode)
-  demonstrates byte-identical equivalence with the local rvcore run on
-  the demo-hash-nano job; the same code path in prove mode produces
-  the cryptographic receipt. Current envelope, stated plainly: the
-  nano job (~16K emulated instructions). Two proving-infrastructure
-  limits, not emulator limits: SP1 6.8's native fast-executor crashes
-  on shard boundaries above ~100K emulated instructions, and the CPU
-  prover's fixed memory floor exceeds the 15GB container. Larger
-  jobs (and the smoke/demo-hash receipts) wait on a bigger prover box
-  or GPU proving — the already-listed operationalization gap. What the
-  upgrade buys when the receipt is available: worker consensus is
-  replaced by one cryptographic proof over the pinned emulator binary,
-  collapsing the trust anchor to rvcore's source (conformance-validated)
-  plus zkVM soundness.
+- **zk tier, same-ELF — RECEIPT VERIFIED (2026-09-14)**: the earlier
+  zk claim was same-ALGORITHM only (an SP1 guest reimplementing
+  demo-hash's FNV streams). The guest is now the actual emulator:
+  `sp1-guest-emu` compiles rvcore itself into the zkVM and executes
+  the actual job ELF with the actual input, committing status,
+  instruction count, the full chunk chain, and output. On the
+  demo-hash-nano job the compressed receipt was cryptographically
+  verified (`SP1 EMU PROVE PASS`) AND its committed values equal the
+  local rvcore run byte-for-byte. What that buys: a job can be
+  accepted on one cryptographic proof over the pinned emulator binary
+  instead of worker consensus — the trust anchor collapses to
+  rvcore's source (QEMU-differential + official riscv-tests
+  validated) plus zkVM soundness. Envelope, stated plainly: the nano
+  job (~16K emulated instructions) proves in ~20 minutes at ~24GB
+  prover RAM. Two proving-infra limits remain (SP1 6.8's native
+  fast-executor crashes on shard boundaries above ~100K emulated
+  instructions — execute mode only, the prover is unaffected — and
+  CPU proving time grows steeply): the smoke job's receipt is a
+  compute-budget question (bigger box or GPU), which is the already-
+  listed operationalization gap. Wiring a verified receipt into the
+  coordinator as an accepted verification tier is the next step.
 - **Identity cost — admission proof-of-work**: keypairs are free, so
   "slashing" could not bite: a banned identity returned with a fresh
   key. Authentication now requires mining

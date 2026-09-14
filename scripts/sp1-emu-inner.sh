@@ -21,13 +21,14 @@ EMU_ELF="$(find target -name 'sp1-guest-emu' -type f | head -1)"
 echo "guest ELF: $EMU_ELF"
 cp "$EMU_ELF" /ws/elf/sp1-guest-emu
 
-echo "== same-ELF execute validation =="
+echo "== same-ELF receipt (nano job) =="
 cd /ws/sp1-host
-# The nano job (~16K emulated instructions) is the current envelope:
-# SP1 6.8's native fast-executor crashes on shard boundaries above
-# ~100K emulated instructions, and the CPU prover's fixed memory floor
-# exceeds this container. Both are proving-infra limits, not emulator
-# limits — the same bytes run byte-identically outside the zkVM.
+# The nano job (~16K emulated instructions) is the proven envelope:
+# ~20 minutes of CPU proving at ~24GB RAM. SP1 6.8's native
+# fast-executor still crashes on shard boundaries above ~100K emulated
+# instructions (execute mode only — the prover handles shards); larger
+# jobs are a compute-budget question (bigger box or GPU).
 cargo run --release --bin emu -- execute ../jobs/demo-hash-nano
+cargo run --release --bin emu -- prove ../jobs/demo-hash-nano
 
 echo "SP1-EMU-COMPLETE"
