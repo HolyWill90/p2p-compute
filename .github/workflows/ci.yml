@@ -34,6 +34,7 @@ jobs:
           # Smoke job reuses the demo-hash program with a 32 KiB input so
           # the network tests execute seconds, not minutes, on CI.
           cp jobs/demo-hash/program.elf jobs/demo-hash-smoke/program.elf
+          cp jobs/demo-hash/program.elf jobs/demo-hash-nano/program.elf
 
       - name: Unit tests (ISA + quorum + network integration)
         run: cargo test --workspace
