@@ -88,9 +88,9 @@ Build the substrate first; the tiers plug into it.
   job (~16K emulated instructions) proves in ~20 minutes at ~24GB
   prover RAM. Two proving-infra limits remain (SP1 6.8's native
   fast-executor crashes on shard boundaries above ~100K emulated
-  instructions — execute mode only, the prover is unaffected — and
-  CPU proving time grows steeply): the smoke job's receipt is a
-  compute-budget question (bigger box or GPU), which is the already-
+  instructions — and the CPU prover errors on multi-shard programs
+  ("artifact not found") in both compressed and core modes): receipts
+  beyond one shard need a newer SP1 or the GPU prover — the already-
   listed operationalization gap. Wiring a verified receipt into the
   coordinator as an accepted verification tier is the next step.
 - **Identity cost — admission proof-of-work**: keypairs are free, so

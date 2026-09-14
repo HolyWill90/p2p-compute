@@ -81,9 +81,10 @@ fn main() {
         return;
     }
 
-    // core(): the compressed pipeline errors on multi-shard programs in
-    // SP1 6.8 ("artifact not found"), so the smoke-scale receipt uses
-    // the core STARK proof (larger, slower to verify, equally sound).
+    // SP1 6.8's CPU prover errors on multi-shard programs ("artifact not
+    // found") in BOTH compressed and core modes, so receipts beyond one
+    // shard await a newer SP1 or the GPU prover. Core is tried first
+    // here as the more permissive path.
     let mut proof = prover.prove(&pk, stdin).core().run().expect("proving");
     let status_zk: u32 = proof.public_values.read();
     let instructions_zk: u64 = proof.public_values.read();
