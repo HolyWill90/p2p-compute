@@ -323,14 +323,14 @@ fn cmd_run(args: RunArgs) {
     }
 
     println!("round 1: {} workers", pool.len());
-    let mut decision = decide(&pool);
+    let mut decision = decide(&pool, if pool.len() > 3 { 5 } else { 3 });
     if matches!(decision, Decision::Escalate) {
         println!("round 1 inconclusive -> escalating quorum to 5");
         for i in 4..=5 {
             let id = format!("w{i}");
             pool.push(run_worker(&args.worker, &args.job_dir, &id, &[]));
         }
-        decision = decide(&pool);
+        decision = decide(&pool, if pool.len() > 3 { 5 } else { 3 });
     }
 
     for r in &pool {

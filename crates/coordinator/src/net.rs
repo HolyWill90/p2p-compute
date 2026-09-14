@@ -367,7 +367,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                     // No majority and reserves remain → escalate to
                     // them (dispatch the held-back workers) instead of
                     // finishing.
-                    if matches!(decide(&job.results), Decision::Escalate)
+                    if matches!(decide(&job.results, job.dispatched_ids.len()), Decision::Escalate)
                         && !job.reserves.is_empty()
                     {
                         let reserves = std::mem::take(&mut job.reserves);
@@ -434,7 +434,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
         }
         if let Some(job) = job_finished {
             let job_id = job.descriptor.job_id.clone();
-            let decision = match decide(&job.results) {
+            let decision = match decide(&job.results, job.dispatched_ids.len()) {
                 Decision::Escalate => Decision::Reject {
                     reason: "no majority".into(),
                 },

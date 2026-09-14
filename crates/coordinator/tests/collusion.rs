@@ -45,7 +45,7 @@ fn quorum_limit_two_of_three_colluders_pass() {
         wr("c2", "bb01", colluder_chain.clone()),
         wr("h1", "aa01", honest_chain.clone()),
     ];
-    let decision = decide(&pool);
+    let decision = decide(&pool, pool.len());
     match &decision {
         Decision::Accept { hash, agreed, .. } => {
             // The wrong answer wins the vote — this is the documented
@@ -69,7 +69,7 @@ fn quorum_escates_when_no_majority_exists() {
         wr("w2", "bbb", vec!["bbb".into()]),
         wr("w3", "ccc", vec!["ccc".into()]),
     ];
-    assert!(matches!(decide(&pool), coordinator::Decision::Escalate));
+    assert!(matches!(decide(&pool, pool.len()), coordinator::Decision::Escalate));
 
     let full = vec![
         wr("w1", "aaa", vec!["aaa".into()]),
@@ -78,7 +78,7 @@ fn quorum_escates_when_no_majority_exists() {
         wr("w4", "ddd", vec!["ddd".into()]),
         wr("w5", "eee", vec!["eee".into()]),
     ];
-    assert!(matches!(decide(&full), coordinator::Decision::Reject { .. }));
+    assert!(matches!(decide(&full, full.len()), coordinator::Decision::Reject { .. }));
 }
 
 /// DISAGREEMENT-DoS COST BOUND: an attacker who always disagrees can
@@ -104,7 +104,7 @@ fn disagreement_dos_is_bounded_and_fail_closed() {
         // full pool.
         executions += round1.len();
         job_executions += round1.len();
-        let decision = decide(&round1);
+        let decision = decide(&round1, round1.len());
         assert!(matches!(decision, coordinator::Decision::Accept { .. }));
 
         // Worst case for the client: attacker colludes with w3's slot
@@ -114,7 +114,7 @@ fn disagreement_dos_is_bounded_and_fail_closed() {
             wr("attacker", "bad1", vec!["bad1".into()]),
             wr("w3", "ccc", vec!["ccc".into()]),
         ];
-        assert!(matches!(decide(&worst1), coordinator::Decision::Escalate));
+        assert!(matches!(decide(&worst1, 3), coordinator::Decision::Escalate));
         executions += 2; // the escalation's two extra workers
         job_executions += 2;
         let worst_full = vec![
@@ -124,7 +124,7 @@ fn disagreement_dos_is_bounded_and_fail_closed() {
             wr("w4", "ddd", vec!["ddd".into()]),
             wr("w5", "eee", vec!["eee".into()]),
         ];
-        assert!(matches!(decide(&worst_full), coordinator::Decision::Reject { .. }));
+        assert!(matches!(decide(&worst_full, 5), coordinator::Decision::Reject { .. }));
         executions += 0; // reject terminates: no further execution
 
         // The attacker is slashed for every failed job regardless of
