@@ -47,14 +47,24 @@ implementation. `jobs/conformance` proves the emulator agrees with
 4. **Ledger**: worker identities (Ed25519) and bond balances persist across
    jobs; slashing is bookkeeping, not trust.
 
-## What a production pilot needs beyond this repo
+## Where the pilot stands
 
-- Networking: real worker machines over TLS instead of local processes (the
-  protocol surface — result JSON and hash chains — is unchanged).
-- Input/output availability: results reference inputs by hash; a content
-  store (the "torrent" layer of this design) makes jobs independently
-  re-executable by any auditor.
+Done since this list was first written: real worker machines over TLS
+(two physical machines, fingerprint-pinned, with admission
+proof-of-work and a slashed liar in the demo ledger), the
+content-addressed store serving blobs peer-to-peer over the wire, and
+the zk tier's same-ELF receipt verified on the nano envelope (the
+emulator itself proven inside the zkVM).
+
+What a production pilot still needs beyond this repo:
+
+- Prover scale-out for the zk tier: multi-shard receipts need a newer
+  SP1, GPU proving, or a prover market (the nano envelope proves the
+  pipeline end to end; big jobs are a compute-budget question).
 - A dispute-market layer: bonded watchers paid from slashed stakes, so
-  challenge coverage is a priced service rather than an assumption.
-- zk tier bring-up: the SP1 cross-validation harness under `scripts/` is the
-  first concrete step.
+  challenge coverage is a priced service rather than an assumption
+  (today the slashing is ledger bookkeeping, not escrowed capital).
+- Internet-scale networking: NAT traversal and worker discovery beyond
+  the coordinator's hints.
+- Job diversity: more real workloads beyond demo-hash, agent-task, and
+  the conformance suites, to exercise the ABI's edges.

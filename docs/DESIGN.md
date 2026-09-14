@@ -288,7 +288,7 @@ byte accounting: a fresh worker's three blobs all arrived from a seeded
 peer (`from_peers: 3, from_server: 0, served_to_peers: 3`), and its
 re-execution matched the original run's hash exactly.
 
-## Known gaps (next milestones)
+## The network layer: serve + daemon
 
 `crates/wire` (length-prefixed JSON frames) + `coordinator serve` +
 `worker daemon`: the coordinator accepts Ed25519-authenticated worker
@@ -316,19 +316,21 @@ from the dispatch decision.
 1. Official `riscv-arch-test` suite (the full official riscv-tests
    rv64ui/um/uc suites pass 67/67; riscv-arch-test is the more
    exhaustive, differently-generated form).
-2. SP1 tier operationalization: proofs run in a container today; a
-   prover-market integration (or GPU proving) is the production step.
+2. zk tier scale-out: the same-ELF receipt is verified at the
+   nano-job envelope (~16K emulated instructions, one shard).
+   Multi-shard CPU proving fails in SP1 6.8 ("artifact not found")
+   and per-shard cycles make bigger receipts a compute-budget
+   question — newer SP1, GPU proving, or a prover market is the
+   production step.
 3. Bisection dispute protocol for on-chain adjudication where full chains
    are not exchanged (the local judge can compare chains directly).
-4. Per-chunk snapshots live on the worker side only; the content store
-   now makes inputs auditable — remaining: serving blobs over the network.
-5. Networking: NAT traversal and peer discovery beyond the
+4. Networking: NAT traversal and peer discovery beyond the
    coordinator's hints. (TLS on the wire is DONE: serve --tls
    generates a self-signed coordinator cert, workers pin its
    BLAKE3 fingerprint via --server-cert, sessions run on
    rustls/TLS 1.3; worker identity stays the Ed25519 nonce
-   handshake.)
-6. FIXED — the intermittent between-jobs worker drop: root cause was a
+   handshake, and admission proof-of-work is the identity-cost
+   dial.)
    shared per-job temp directory (`temp/p2pc-worker-{job_id}`) — two
    workers materializing the same job concurrently raced on
    program.elf, and one executed a partially-written ELF (hanging the

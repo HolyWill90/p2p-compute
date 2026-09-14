@@ -14,7 +14,7 @@ Every verification mechanism consumes that chunk-hash chain:
 |---|---|---|---|
 | Budget | Quorum N=3 → 5, bond slashing | ~3× | implemented |
 | Standard | Optimistic acceptance + dispute game (one-chunk judge) | ~1× | implemented |
-| Strong | SP1 zkVM proof — same algorithm, guest compiled for SP1's RISC-V | 1× + prover tax | receipt verified (three-way digest match on a 4 KiB input; full same-ELF proving not yet automated) |
+| Strong | SP1 zkVM proof **of the emulator itself executing the actual job ELF** | 1× + prover tax | **receipt verified** (nano envelope, ~16K instructions; multi-shard proving is an open infra gap) |
 
 See `docs/DESIGN.md` for the decision log and `docs/PILOT.md` for the
 product direction.
@@ -22,22 +22,25 @@ product direction.
 ## Layout
 
 ```
-crates/abi         job ABI: memory map, halt convention, pinned ISA string
-crates/rvcore      the emulator: RV64IMC interpreter + chunk-hash chain (BLAKE3)
-crates/jobfmt      job manifest/result formats
-crates/worker      worker daemon + local runner (a "peer")
-crates/coordinator quorum/dispute/ledger logic + network server (the job client)
-crates/wire        transport: length-prefixed JSON frames, TLS support, peer protocol
-crates/contentstore BLAKE3-addressed blob store (the torrent layer, seeded)
-crates/difftest    differential determinism harness
-crates/conformance ISA conformance differential driver (emulator vs QEMU)
-jobs/demo-hash     the demo job: no_std Rust, compiled to a RISC-V ELF
+crates/abi           job ABI: memory map, halt convention, pinned ISA string
+crates/rvcore        the emulator: RV64IMC interpreter + chunk-hash chain (BLAKE3)
+crates/jobfmt        job manifest/result formats, signing-message encoding
+crates/worker        worker daemon + local runner (a "peer")
+crates/coordinator   quorum/dispute/ledger logic + network server (the job client)
+crates/wire          transport: length-prefixed JSON frames, TLS, admission PoW
+crates/contentstore  BLAKE3-addressed blob store (the torrent layer, seeded)
+crates/difftest      differential determinism harness
+crates/conformance   conformance driver: QEMU differential + riscv-tests tally
+arch-tests/          the official riscv-tests ELFs (rv64ui/um/uc, 67 tests)
+jobs/demo-hash       the demo job: no_std Rust, compiled to a RISC-V ELF
 jobs/demo-hash-smoke same program, 32 KiB input — powers the fast network tests
-jobs/conformance   ISA corner-case suite (explicit inline asm, both impls)
-jobs/agent-task    the agent-work pilot job (see docs/PILOT.md)
-sp1-guest          the demo algorithm as an SP1 zkVM guest (zk tier harness)
-jobs/demo-hash-nano 1 KiB smoke job — the same-ELF zk proof's workload
-sp1-host           SP1 SDK host: execute + verify the guest receipt
+jobs/demo-hash-nano  1 KiB input — the same-ELF zk receipt's workload
+jobs/conformance     ISA corner-case suite (explicit inline asm, both impls)
+jobs/agent-task      the agent-work pilot job (see docs/PILOT.md)
+sp1-guest/           SP1 zkVM guests: the algorithm (fnv) and the emulator (emu)
+sp1-host/            SP1 SDK host: execute, prove, verify receipts
+scripts/             packaging + validation pipelines (Docker-based)
+docs/                DESIGN.md decision log + PILOT.md product direction
 ```
 
 ## Quickstart
@@ -82,26 +85,28 @@ target/release/coordinator.exe optimistic jobs/demo-hash --worker target/release
 # 12. agent-task pilot: deterministic agent-shaped batch work with an audit chain
 cargo run --release -p worker -- run jobs/agent-task --id agent
 
-# 13. zk tier, same-ELF: the emulator itself executed inside the zkVM
-#     (requires Docker + the SP1 toolchain, cached in the sp1v container)
+# 13. zk tier, same-ELF: a verified receipt for the emulator itself
+#     executing the actual job ELF (Docker + ~24GB RAM for the prover;
+#     the SP1 toolchain is cached in the sp1v container)
 scripts/sp1-emu.sh
 
-# 12. content-addressed store: publish a job, reconstruct it anywhere from hashes
+# 14. algorithm-level zk cross-check: the same FNV algorithm as an
+#     independent SP1 guest, receipt verified against the host reference
+scripts/sp1-validate.sh
+
+# 15. content-addressed store: publish a job, reconstruct it anywhere from hashes
 target/release/coordinator.exe publish jobs/demo-hash --store target/store --out target/demo.desc.json
 target/release/coordinator.exe fetch --desc target/demo.desc.json --store target/store --out target/materialized
 target/release/worker.exe run target/materialized --id from-store   # identical result hash
 target/release/coordinator.exe verify --store target/store
 
-# 13. zk tier (needs the SP1 toolchain, ~2 GB one-time download)
-#     verifies the same ALGORITHM as a zkVM guest — not yet the same ELF binary
-scripts/sp1-validate.sh
-
-# 14. TLS: serve --tls generates a self-signed coordinator cert on first run;
+# 16. network session: TLS + authenticated identities + admission PoW;
+#     serve --tls generates a self-signed coordinator cert on first run;
 #     workers pin its fingerprint (--server-cert) — no other server is accepted
-target/release/coordinator.exe serve --jobs-dir target/jobs --store target/store --tls --max-jobs 1
-target/release/worker.exe daemon --server 127.0.0.1:7777 --id wA --identity wA.key     --server-cert target/store/coordinator-cert.der --listen-port 7780
+target/release/coordinator.exe serve --jobs-dir target/jobs --store target/store --tls --identity-pow-bits 20 --max-jobs 1
+target/release/worker.exe daemon --server 127.0.0.1:7777 --id wA --identity wA.key --server-cert target/store/coordinator-cert.der --listen-port 7780
 
-# 15. persistent multi-job session with peer-to-peer blob exchange:
+# 17. persistent multi-job session with peer-to-peer blob exchange:
 #     terminal A:  coordinator serve --jobs-dir target/jobs --store target/store --pool 2 --max-jobs 3
 #     terminal B:  worker daemon --server 127.0.0.1:7777 --id wA --identity wA.key --listen-port 7780
 #     then drop descriptor files (from `coordinator publish --out`) into target/jobs;
@@ -110,8 +115,33 @@ target/release/worker.exe daemon --server 127.0.0.1:7777 --id wA --identity wA.k
 
 On CI (`.github/workflows/ci.yml`), the differential test runs on
 Windows/Linux/macOS (x64 + ARM64), a QEMU job cross-checks the emulator
-against an independent RISC-V implementation, and a final job asserts all
-three platforms produced byte-identical chunk hash chains.
+against an independent RISC-V implementation, the official riscv-tests
+tally runs everywhere, and a final job asserts all three platforms
+produced byte-identical chunk hash chains. All five checks are required
+on the protected `main` branch.
+
+## What is verified, and what is not
+
+This project does not oversell its tiers. What the repo actually
+demonstrates:
+
+- **Fraud detection over a real network**: two physical machines, TLS
+  with pinned fingerprints, proof-of-work-gated authentication, a
+  worker that fabricated a result — caught by quorum, excluded from
+  acceptance, bond slashed in the ledger.
+- **Independent correctness evidence**: the official riscv-tests
+  suites (67/67) and a QEMU differential — sampled evidence that the
+  platform matches the ISA, not a proof.
+- **A verified same-ELF zk receipt**: a cryptographic proof that the
+  pinned emulator, compiled inside the zkVM, executed the real job ELF
+  and produced the exact chunk chain the local run produced (nano
+  envelope). This is the tier that removes trust in workers entirely.
+
+What remains open (full list in `docs/DESIGN.md`): bonds are ledger
+bookkeeping rather than escrowed stake; identity cost is
+proof-of-work, not capital; the coordinator is trusted for worker
+selection; multi-shard zk proving awaits a newer SP1 or a GPU prover;
+NAT traversal and internet-scale discovery are unbuilt.
 
 ## The determinism contract
 
