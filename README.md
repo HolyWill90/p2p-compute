@@ -142,3 +142,8 @@ silently.
 0x83F0_0000  initial stack pointer
 halt: execute `ebreak`   |   ISA pin: rv64imc (no atomics, no FP)
 ```
+
+## License
+
+Dual-licensed under MIT or Apache-2.0, at your option (see
+LICENSE-MIT and LICENSE-APACHE).
