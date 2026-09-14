@@ -37,12 +37,16 @@ fn local_reference(
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "execute".into());
+    let mut args = std::env::args().skip(1);
+    let mode = args.next().unwrap_or_else(|| "execute".into());
+    let job_dir = args.next().unwrap_or_else(|| "../jobs/demo-hash-smoke".into());
     assert!(mode == "execute" || mode == "prove", "mode: execute|prove");
+    assert!(!mode.starts_with('-'), "mode: execute|prove [job-dir]");
 
-    let manifest_bytes = std::fs::read("../jobs/demo-hash-smoke/job.json").expect("manifest");
-    let elf_bytes = std::fs::read("../jobs/demo-hash-smoke/program.elf").expect("job elf");
-    let input = std::fs::read("../jobs/demo-hash-smoke/input.bin").expect("job input");
+    let manifest_bytes = std::fs::read(format!("{job_dir}/job.json")).expect("manifest");
+    let elf_bytes = std::fs::read(format!("{job_dir}/program.elf")).expect("job elf");
+    let input = std::fs::read(format!("{job_dir}/input.bin")).expect("job input");
+    println!("job: {job_dir}");
 
     let (status, instructions, chain, output) =
         local_reference(&manifest_bytes, &elf_bytes, &input);
@@ -77,7 +81,7 @@ fn main() {
         return;
     }
 
-    let mut proof = prover.prove(&pk, stdin).compressed().run().expect("proving");
+    let mut proof = prover.prove(&pk, stdin).core().run().expect("proving");
     let status_zk: u32 = proof.public_values.read();
     let instructions_zk: u64 = proof.public_values.read();
     let chain_zk: Vec<[u8; 32]> = proof.public_values.read();

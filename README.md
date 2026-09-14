@@ -36,6 +36,7 @@ jobs/demo-hash-smoke same program, 32 KiB input — powers the fast network test
 jobs/conformance   ISA corner-case suite (explicit inline asm, both impls)
 jobs/agent-task    the agent-work pilot job (see docs/PILOT.md)
 sp1-guest          the demo algorithm as an SP1 zkVM guest (zk tier harness)
+jobs/demo-hash-nano 1 KiB smoke job — the same-ELF zk proof's workload
 sp1-host           SP1 SDK host: execute + verify the guest receipt
 ```
 
@@ -80,6 +81,10 @@ target/release/coordinator.exe optimistic jobs/demo-hash --worker target/release
 
 # 12. agent-task pilot: deterministic agent-shaped batch work with an audit chain
 cargo run --release -p worker -- run jobs/agent-task --id agent
+
+# 13. zk tier, same-ELF: the emulator itself executed inside the zkVM
+#     (requires Docker + the SP1 toolchain, cached in the sp1v container)
+scripts/sp1-emu.sh
 
 # 12. content-addressed store: publish a job, reconstruct it anywhere from hashes
 target/release/coordinator.exe publish jobs/demo-hash --store target/store --out target/demo.desc.json
