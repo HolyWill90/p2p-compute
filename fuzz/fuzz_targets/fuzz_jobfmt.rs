@@ -5,9 +5,13 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
+    // Byte-safe split: from_utf8_lossy output can contain multi-byte
+    // replacement chars, and str::split_at would panic mid-char.
+    let mid = data.len() / 2;
+    let a = String::from_utf8_lossy(&data[..mid]).to_string();
+    let b = String::from_utf8_lossy(&data[mid..]).to_string();
     let s = String::from_utf8_lossy(data);
-    let (a, b) = s.split_at(s.len() / 2);
-    let _ = jobfmt::from_hex(a, a.len() / 2);
+    let _ = jobfmt::from_hex(&a, a.len() / 2);
     let _ = jobfmt::from_hex(s.trim(), 32);
     let _ = jobfmt::confined_name(&s);
 
