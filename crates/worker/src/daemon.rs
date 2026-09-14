@@ -193,6 +193,15 @@ pub enum SessionEnd {
 /// with capped exponential backoff (a worker should be a durable
 /// presence, not a fair-weather peer). Stats accumulate across
 /// sessions; the loop ends only on a coordinator-initiated shutdown.
+/// The per-worker directory a job materializes into. The job id comes
+/// from an untrusted descriptor and lands inside a path that is then
+/// `remove_dir_all`d — a crafted id with separators or `..` would
+/// escape and delete or write outside the worker's scratch space.
+pub fn job_materialize_dir(worker_id: &str, job_id: &str) -> Result<std::path::PathBuf, String> {
+    jobfmt::confined_name(job_id)?;
+    Ok(std::env::temp_dir().join(format!("p2pc-worker-{worker_id}-{job_id}")))
+}
+
 pub fn run_daemon(cfg: &DaemonConfig) -> Result<DaemonStats, String> {
     let counters = Arc::new(Counters::default());
     let mut backoff = std::time::Duration::from_secs(1);
@@ -403,10 +412,7 @@ fn session_once(
                 // Materialize from the local (hash-verified) store.
                 // Per-WORKER directory: two workers running the same
                 // job concurrently must not share materialized files.
-                let job_dir = std::env::temp_dir().join(format!(
-                    "p2pc-worker-{}-{}",
-                    cfg.worker_id, descriptor.job_id
-                ));
+                let job_dir = job_materialize_dir(&cfg.worker_id, &descriptor.job_id)?;
                 std::fs::remove_dir_all(&job_dir).ok();
                 contentstore::materialize(&descriptor, &store, &job_dir)
                     .map_err(|e| format!("materialize: {e}"))?;
@@ -514,5 +520,26 @@ fn session_once(
             }
             other => return Err(format!("unexpected server message: {other:?}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materialize_dir_rejects_untrusted_job_ids() {
+        // REGRESSION: descriptor.job_id landed in a path that is then
+        // remove_dir_all'd. A crafted id with separators or `..` must
+        // be refused, not traversed.
+        assert!(job_materialize_dir("wA", "demo-hash-smoke-0001").is_ok());
+        assert!(job_materialize_dir("wA", "../../etc").is_err());
+        assert!(job_materialize_dir("wA", "a/b").is_err());
+        assert!(job_materialize_dir("wA", r"a\b").is_err());
+        assert!(job_materialize_dir("wA", "..").is_err());
+        // The constructed path stays inside the worker's scratch space.
+        let p = job_materialize_dir("wA", "demo-hash-smoke-0001").unwrap();
+        assert!(p.starts_with(std::env::temp_dir()));
+        assert!(p.to_string_lossy().ends_with("p2pc-worker-wA-demo-hash-smoke-0001"));
     }
 }

@@ -56,9 +56,19 @@ pub fn parse(bytes: &[u8]) -> Result<ElfImage, String> {
     }
 
     let mut segments = Vec::new();
+    let phoff_us = phoff as usize;
     for i in 0..phnum {
-        let base = phoff as usize + i * 56;
-        if base + 56 > bytes.len() {
+        // phoff and i*56 are file-controlled: checked, like every
+        // other offset in this parser (fuzz-found overflow class).
+        let base = match phoff_us.checked_add(i.checked_mul(56).ok_or("elf: program header table overflows")?) {
+            Some(b) => b,
+            None => return Err("elf: program header table overflows".into()),
+        };
+        let base_end = match base.checked_add(56) {
+            Some(e) => e,
+            None => return Err("elf: program header table overflows".into()),
+        };
+        if base_end > bytes.len() {
             return Err("elf: truncated program headers".into());
         }
         if u32le(base) != PT_LOAD {
@@ -71,9 +81,9 @@ pub fn parse(bytes: &[u8]) -> Result<ElfImage, String> {
         if filesz > memsz {
             return Err("elf: filesz > memsz".into());
         }
-        // The segment must fit the pinned 4 GiB space; this bounds the
-        // BSS resize allocation and rejects absurd memsz claims. All
-        // arithmetic is checked — the fields are file-controlled.
+        // The segment must fit the pinned 4 GiB space. All arithmetic
+        // is checked — the fields are file-controlled (a fuzz-found
+        // overflow lived here).
         let mem_end = match vaddr.checked_add(memsz) {
             Some(e) => e,
             None => return Err("elf: segment range overflows".into()),
@@ -89,8 +99,11 @@ pub fn parse(bytes: &[u8]) -> Result<ElfImage, String> {
         if file_end > bytes.len() {
             return Err("elf: segment beyond file end".into());
         }
-        let mut data = bytes[off..file_end].to_vec();
-        data.resize(memsz as usize, 0); // BSS tail is zeros
+        // Only the FILE bytes are loaded. The BSS tail (memsz > filesz)
+        // is intentionally NOT pre-allocated: sparse memory reads
+        // unallocated pages as zeros, so pre-resizing would let a
+        // hostile memsz claim gigabytes of allocation for nothing.
+        let data = bytes[off..file_end].to_vec();
         segments.push((vaddr, data));
     }
     if segments.is_empty() {
@@ -107,19 +120,25 @@ fn find_tohost_section(
     shnum: usize,
     shstrndx: usize,
 ) -> Option<u64> {
-    if shoff == 0 || shnum == 0 {
+    if shoff == 0 || shnum == 0 || shentsize == 0 {
         return None;
     }
+    // Every offset here derives from file-controlled header fields: all
+    // arithmetic is checked, and all file access goes through bounds-
+    // checked `get` (a fuzz-found overflow lived here — see the fuzz
+    // target `fuzz_elf_parse`).
+    let checked = |a: usize, b: usize| -> Option<usize> { a.checked_add(b) };
+    let shstr_hdr = checked(shoff, shstrndx.checked_mul(shentsize)?)?;
     // The shstrtab header's sh_offset field: read exactly its 8 bytes.
     // (A whole-tail `get(start..)` would not convert to [u8; 8] unless
     // the header happened to end the file, silently yielding None.)
-    let shstr_hdr = shoff + shstrndx * shentsize;
     let shstr_offset = u64::from_le_bytes(
-        data.get(shstr_hdr + 24..shstr_hdr + 32)?.try_into().ok()?,
+        data.get(checked(shstr_hdr, 24)?..checked(shstr_hdr, 32)?)?.try_into().ok()?,
     ) as usize;
     for i in 0..shnum {
-        let base = shoff + i * shentsize;
-        if base + 64 > data.len() {
+        let base = checked(shoff, i.checked_mul(shentsize)?)?;
+        let base_end = checked(base, 64)?;
+        if base_end > data.len() {
             break;
         }
         let sec_name = u32::from_le_bytes(data.get(base..base + 4)?.try_into().ok()?);
@@ -128,11 +147,12 @@ fn find_tohost_section(
         if sec_type != 1 {
             continue;
         }
-        let name_start = shstr_offset + sec_name as usize;
-        let name_end = data[name_start..].iter().position(|&b| b == 0)
+        let name_start = checked(shstr_offset, sec_name as usize)?;
+        let name_end = data.get(name_start..)?
+            .iter().position(|&b| b == 0)
             .map(|p| name_start + p)
             .unwrap_or(name_start);
-        if &data[name_start..name_end] == b".tohost" {
+        if data.get(name_start..name_end)? == b".tohost" {
             return Some(sec_addr);
         }
     }

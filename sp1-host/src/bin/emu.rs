@@ -40,7 +40,10 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "execute".into());
     let job_dir = args.next().unwrap_or_else(|| "../jobs/demo-hash-smoke".into());
-    assert!(mode == "execute" || mode == "prove", "mode: execute|prove");
+    assert!(
+        mode == "execute" || mode == "prove" || mode == "verify",
+        "mode: execute|prove|verify [job-dir] [receipt] [guest-elf]"
+    );
     assert!(!mode.starts_with('-'), "mode: execute|prove [job-dir]");
 
     let manifest_bytes = std::fs::read(format!("{job_dir}/job.json")).expect("manifest");
@@ -56,6 +59,43 @@ fn main() {
         chain.len(),
         hex(&chain.last().copied().unwrap_or_default()),
     );
+
+    if mode == "verify" {
+        // CI mode: no proving. Load the committed receipt, re-derive
+        // the verifying key from the committed guest ELF (binding the
+        // receipt to that exact binary), cryptographically verify it,
+        // and require the committed values to equal the local rvcore
+        // run. This is how CI checks the zk tier without a prover.
+        let receipt_path = std::env::args()
+            .nth(3)
+            .unwrap_or_else(|| "../sp1-artifacts/nano-receipt.bin".into());
+        let guest_path = std::env::args()
+            .nth(4)
+            .unwrap_or_else(|| "../sp1-artifacts/sp1-guest-emu.elf".into());
+        let mut proof =
+            sp1_sdk::SP1ProofWithPublicValues::load(&receipt_path).expect("load receipt");
+        let guest_bytes = std::fs::read(&guest_path).expect("load committed guest ELF");
+        let prover = ProverClient::builder().cpu().build();
+        let pk = prover
+            .setup(Elf::Dynamic(guest_bytes.into()))
+            .expect("setup from committed guest ELF");
+        let status_zk: u32 = proof.public_values.read();
+        let instructions_zk: u64 = proof.public_values.read();
+        let chain_zk: Vec<[u8; 32]> = proof.public_values.read();
+        let output_zk: Vec<u8> = proof.public_values.read();
+        assert_eq!(status_zk, status, "status mismatch");
+        assert_eq!(instructions_zk, instructions, "instruction count mismatch");
+        assert_eq!(chain_zk, chain, "chunk chain mismatch");
+        assert_eq!(output_zk, output, "output mismatch");
+        prover.verify(&proof, &pk.verifying_key(), None).expect("receipt verification");
+        println!(
+            "SP1 EMU RECEIPT VERIFY PASS: committed receipt verified against the committed guest ELF - {} produced {} ({} instruction(s))",
+            job_dir,
+            hex(&chain_zk.last().copied().unwrap_or_default()),
+            instructions_zk,
+        );
+        return;
+    }
 
     let guest_bytes = std::fs::read("../elf/sp1-guest-emu").expect("guest ELF (build sp1-guest first)");
     let elf = Elf::Dynamic(guest_bytes.into());
@@ -98,6 +138,12 @@ fn main() {
     prover
         .verify(&proof, &pk.verifying_key(), None)
         .expect("receipt verification");
+    // Persist the receipt + the guest ELF so CI can re-verify this
+    // proof forever without a prover (sp1-artifacts/, committed).
+    std::fs::create_dir_all("../sp1-artifacts").ok();
+    proof.save("../sp1-artifacts/nano-receipt.bin").expect("save receipt");
+    std::fs::copy("../elf/sp1-guest-emu", "../sp1-artifacts/sp1-guest-emu.elf")
+        .expect("copy guest ELF");
     println!(
         "SP1 EMU PROVE PASS: verified receipt - rvcore on the actual job ELF produced {} ({} instruction(s), {} chunk(s))",
         hex(&chain_zk.last().copied().unwrap_or_default()),

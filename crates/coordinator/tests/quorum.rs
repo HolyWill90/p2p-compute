@@ -25,7 +25,7 @@ fn trapped(id: &str, hash: &str) -> WorkerResult {
 
 #[test]
 fn three_way_majority_accepts() {
-    let d = decide(&[w("w1", "aaa"), w("w2", "aaa"), w("w3", "bbb")]);
+    let d = decide(&[w("w1", "aaa"), w("w2", "aaa"), w("w3", "bbb")], 3);
     match d {
         Decision::Accept { hash, agreed, .. } => {
             assert_eq!(hash, "aaa");
@@ -37,13 +37,13 @@ fn three_way_majority_accepts() {
 
 #[test]
 fn unanimous_accepts() {
-    let d = decide(&[w("w1", "aaa"), w("w2", "aaa"), w("w3", "aaa")]);
+    let d = decide(&[w("w1", "aaa"), w("w2", "aaa"), w("w3", "aaa")], 3);
     assert!(matches!(d, Decision::Accept { .. }));
 }
 
 #[test]
 fn all_distinct_escalates_then_rejects() {
-    let d3 = decide(&[w("w1", "aaa"), w("w2", "bbb"), w("w3", "ccc")]);
+    let d3 = decide(&[w("w1", "aaa"), w("w2", "bbb"), w("w3", "ccc")], 3);
     assert!(matches!(d3, Decision::Escalate));
     let d5 = decide(&[
         w("w1", "aaa"),
@@ -51,7 +51,7 @@ fn all_distinct_escalates_then_rejects() {
         w("w3", "ccc"),
         w("w4", "ddd"),
         w("w5", "eee"),
-    ]);
+    ], 5);
     assert!(matches!(d5, Decision::Reject { .. }));
 }
 
@@ -64,7 +64,7 @@ fn escalation_recovers_majority() {
         w("w3", "aaa"),
         w("w4", "aaa"),
         w("w5", "aaa"),
-    ]);
+    ], 5);
     match d {
         Decision::Accept { hash, agreed, .. } => {
             assert_eq!(hash, "aaa");
@@ -83,7 +83,7 @@ fn minority_corruption_is_slashed() {
         w("w4", "aaa"),
         w("w5", "aaa"),
     ];
-    let d = decide(&pool);
+    let d = decide(&pool, pool.len());
     let ledger = slashing(&d, &pool);
     let w2 = ledger.iter().find(|(id, _)| id == "w2").unwrap();
     assert_eq!(*w2, ("w2".into(), -100));
@@ -94,7 +94,7 @@ fn minority_corruption_is_slashed() {
 #[test]
 fn majority_traps_reject_the_job() {
     // The program itself is broken: two of three crash identically.
-    let d = decide(&[trapped("w1", "aaa"), trapped("w2", "bbb"), w("w3", "aaa")]);
+    let d = decide(&[trapped("w1", "aaa"), trapped("w2", "bbb"), w("w3", "aaa")], 3);
     match d {
         Decision::Reject { reason } => assert!(reason.contains("trapped")),
         _ => panic!("expected reject"),
@@ -107,13 +107,13 @@ fn chain_disagreement_in_winning_group_rejects() {
     // never silently accepted.
     let mut liar = w("w2", "aaa");
     liar.chunk_hashes = vec!["zzz".into(), "aaa".into()];
-    let d = decide(&[w("w1", "aaa"), liar, w("w3", "bbb")]);
+    let d = decide(&[w("w1", "aaa"), liar, w("w3", "bbb")], 3);
     assert!(matches!(d, Decision::Reject { .. }));
 }
 
 #[test]
 fn trapped_minority_with_majority_accepts() {
-    let d = decide(&[w("w1", "aaa"), trapped("w2", "aaa"), w("w3", "aaa")]);
+    let d = decide(&[w("w1", "aaa"), trapped("w2", "aaa"), w("w3", "aaa")], 3);
     assert!(matches!(d, Decision::Accept { .. }));
 }
 
@@ -122,9 +122,9 @@ fn trapped_minority_with_majority_accepts() {
 fn duplicate_votes_do_not_stuff_quorum() {
     // One worker's repeated submissions must not manufacture a
     // majority: quorum counts workers, not messages.
-    let d = decide(&[w("w1", "aaa"), w("w1", "aaa"), w("w2", "bbb")]);
+    let d = decide(&[w("w1", "aaa"), w("w1", "aaa"), w("w2", "bbb")], 3);
     assert!(matches!(d, Decision::Escalate), "got {d:?}");
-    let d = decide(&[w("w2", "bbb"), w("w2", "bbb"), w("w1", "aaa")]);
+    let d = decide(&[w("w2", "bbb"), w("w2", "bbb"), w("w1", "aaa")], 3);
     assert!(matches!(d, Decision::Escalate), "got {d:?}");
 }
 
@@ -208,4 +208,47 @@ mod signature_binding {
         r.sig_hex = Some("a".repeat(63)); // short
         assert!(verify_signature(&r).is_err());
     }
+}
+
+
+#[test]
+fn timeout_partial_response_cannot_self_approve() {
+    // REGRESSION: decide() used to derive the majority threshold from
+    // the RECEIVED results, so if only 1 of 5 dispatched workers
+    // answered before the deadline, that lone vote was a "majority"
+    // and self-approved. The threshold is anchored to the dispatched
+    // pool: partial responses escalate or reject, never accept.
+    // Round 1 (3 dispatched, reserves held back): a lone response
+    // escalates — the threshold is 2, so one vote cannot self-approve.
+    let d = decide(&[w("w1", "aaa")], 3);
+    assert!(matches!(d, Decision::Escalate), "1 of 3: {d:?}");
+    // Two agreeing votes ARE a strict majority of 3: a legitimate
+    // quorum, even though the third worker never answered.
+    let d = decide(&[w("w1", "aaa"), w("w2", "aaa")], 3);
+    assert!(matches!(d, Decision::Accept { .. }), "2 of 3: {d:?}");
+    // Post-escalation (5 dispatched, no reserves left): the threshold
+    // is 3 — one or two responses must never accept.
+    let d = decide(&[w("w1", "aaa")], 5);
+    assert!(!matches!(d, Decision::Accept { .. }), "1 of 5 accepted: {d:?}");
+    let d = decide(&[w("w1", "aaa"), w("w2", "aaa")], 5);
+    assert!(!matches!(d, Decision::Accept { .. }), "2 of 5 accepted: {d:?}");
+    // A full-pool majority still accepts normally.
+    let d = decide(&[w("w1", "aaa"), w("w2", "aaa"), w("w3", "aaa")], 3);
+    assert!(matches!(d, Decision::Accept { .. }), "3 of 3 must accept");
+}
+
+#[test]
+fn rejected_jobs_do_not_slash_responders() {
+    // REGRESSION: a timeout rejection used to burn every responder's
+    // bond, including a lone honest worker whose peers were merely
+    // slow. Slashing requires proof: an accepted majority the worker
+    // sits outside of. Rejected jobs return bonds untouched.
+    let pool = vec![w("w1", "aaa"), w("w2", "bbb")];
+    let d = decide(&pool, 3);
+    assert!(matches!(d, Decision::Escalate));
+    let ledger = slashing(&d, &pool);
+    assert!(
+        ledger.iter().all(|(_, v)| *v == 0),
+        "rejected job must not slash: {ledger:?}"
+    );
 }

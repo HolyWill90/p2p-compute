@@ -1,0 +1,38 @@
+[workspace]
+
+[package]
+name = "p2pc-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rvcore = { path = "../crates/rvcore" }
+jobfmt = { path = "../crates/jobfmt" }
+wire = { path = "../crates/wire" }
+contentstore = { path = "../crates/contentstore" }
+
+[[bin]]
+name = "fuzz_elf_parse"
+path = "fuzz_targets/fuzz_elf_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_jobfmt"
+path = "fuzz_targets/fuzz_jobfmt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_wire_frame"
+path = "fuzz_targets/fuzz_wire_frame.rs"
+test = false
+doc = false
+bench = false

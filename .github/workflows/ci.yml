@@ -34,6 +34,7 @@ jobs:
           # Smoke job reuses the demo-hash program with a 32 KiB input so
           # the network tests execute seconds, not minutes, on CI.
           cp jobs/demo-hash/program.elf jobs/demo-hash-smoke/program.elf
+          cp jobs/demo-hash/program.elf jobs/demo-hash-nano/program.elf
 
       - name: Unit tests (ISA + quorum + network integration)
         run: cargo test --workspace
@@ -90,6 +91,81 @@ jobs:
 
       - name: Official riscv-tests tally (tohost, release)
         run: cargo run --release -p conformance -- arch arch-tests
+
+
+  audit:
+    # Dependency advisories: the RustSec database against Cargo.lock.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.98.1
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        run: cargo audit
+        # Informational warnings do not fail; known vulnerabilities do.
+
+  fuzz:
+    # Panic/overflow/ASAN fuzzing of the untrusted-input surface: the
+    # ELF parser, the result-format encoders, and the wire decoder.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz the ELF parser
+        run: cargo +nightly fuzz run fuzz_elf_parse -- -max_total_time=120 -rss_limit_mb=2560
+      - name: Fuzz the job-format encoders
+        run: cargo +nightly fuzz run fuzz_jobfmt -- -max_total_time=60
+      - name: Fuzz the wire decoder
+        run: cargo +nightly fuzz run fuzz_wire_frame -- -max_total_time=60
+      - name: Upload crash artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+
+  zk-receipt:
+    # Re-verify the committed same-ELF SP1 receipt against the local
+    # rvcore run: proves the checked-in artifacts still attest the
+    # checked-in emulator and job, without needing a prover.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: riscv64imac-unknown-none-elf
+      - name: Install protoc (sp1-prover-types build dependency)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Build the nano job ELF (RISC-V)
+        run: |
+          (cd jobs/demo-hash/job && cargo build --release)
+          cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash-nano/program.elf
+      - name: Verify the committed nano receipt
+        working-directory: sp1-host
+        run: cargo run --release --bin emu -- verify ../jobs/demo-hash-nano ../sp1-artifacts/nano-receipt.bin ../sp1-artifacts/sp1-guest-emu.elf
+
+  coverage:
+    # Line-coverage floor over the verification-critical crates, so
+    # security-relevant code cannot silently lose its tests.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Coverage floor (rvcore + coordinator + wire)
+        run: cargo llvm-cov --workspace --fail-under-lines 25
 
   cross-verify:
     needs: test

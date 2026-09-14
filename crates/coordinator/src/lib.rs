@@ -36,9 +36,13 @@ fn group_by<'a>(results: &[&'a WorkerResult]) -> Vec<(String, Vec<&'a WorkerResu
     groups
 }
 
-/// `pool` is the number of results in this round (3 = initial, 5 =
-/// after one escalation). Threshold is a strict majority.
-pub fn decide(pool_results: &[WorkerResult]) -> Decision {
+/// `expected_pool` is the number of workers DISPATCHED for this round
+/// (3 = initial, 5 = after one escalation) — not the number of results
+/// received. The threshold is a strict majority OF THE DISPATCHED
+/// pool: a quorum that shrinks to whoever answered in time would let
+/// one slow-network survivor self-approve a result. Responders fewer
+/// than the threshold therefore escalate or reject, never accept.
+pub fn decide(pool_results: &[WorkerResult], expected_pool: usize) -> Decision {
     // One vote per worker, even if a caller hands us raw duplicates:
     // quorum counts workers, not messages. (The network layer also
     // enforces this at receipt; this is the second line of defense.)
@@ -47,12 +51,18 @@ pub fn decide(pool_results: &[WorkerResult]) -> Decision {
         .iter()
         .filter(|r| seen.insert(r.worker_id.clone()))
         .collect();
-    let pool = deduped.len();
+    // A received count above the dispatched pool is itself anomalous
+    // (duplicate identities); it must never lower the bar.
+    let received = deduped.len();
+    let pool = expected_pool.max(received);
     let threshold = pool / 2 + 1;
     let refs: Vec<&WorkerResult> = deduped;
 
     let halted: Vec<&WorkerResult> = refs.iter().copied().filter(|r| r.status == "halted").collect();
-    let trapped = pool - halted.len();
+    // The trapped-majority heuristic counts RECEIVED results only:
+    // workers that never answered are not evidence that the job is
+    // broken (the anchored `pool` below is for the accept threshold).
+    let trapped = received - halted.len();
 
     if halted.len() >= threshold {
         let mut groups = group_by(&halted);
@@ -87,7 +97,7 @@ pub fn decide(pool_results: &[WorkerResult]) -> Decision {
 
     if pool >= 5 {
         return Decision::Reject {
-            reason: "no majority after escalation; bonds burned".into(),
+            reason: "no majority after escalation; bonds returned".into(),
         };
     }
 
@@ -98,6 +108,13 @@ pub fn decide(pool_results: &[WorkerResult]) -> Decision {
 /// accepted majority loses its bond; workers in the winning group get
 /// paid. The numbers live with the coordinator's ledger, not here.
 pub fn slashing(decision: &Decision, pool_results: &[WorkerResult]) -> Vec<(String, i64)> {
+    // Slashing requires PROOF of deviation: an accepted majority that
+    // the worker's result sits outside of. A rejected job (timeout,
+    // exhausted escalation) proves nothing about any individual
+    // responder — a lone honest worker whose peers timed out is
+    // indistinguishable from a liar — so bonds are returned untouched.
+    // Slow-worker griefing is instead priced by the admission
+    // proof-of-work, which every reconnection re-charges.
     match decision {
         Decision::Accept { agreed, .. } => pool_results
             .iter()
@@ -110,7 +127,7 @@ pub fn slashing(decision: &Decision, pool_results: &[WorkerResult]) -> Vec<(Stri
                 }
             })
             .collect(),
-        _ => pool_results.iter().map(|r| (r.worker_id.clone(), -100)).collect(),
+        _ => pool_results.iter().map(|r| (r.worker_id.clone(), 0)).collect(),
     }
 }
 

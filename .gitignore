@@ -16,3 +16,8 @@ p2pc-worker.tar.gz
 *.done
 *.dispatching
 __pycache__/
+
+# fuzzing + coverage artifacts
+fuzz/target/
+fuzz/artifacts/
+*.profraw
