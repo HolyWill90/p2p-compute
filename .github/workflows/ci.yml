@@ -140,11 +140,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
         uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: riscv64imac-unknown-none-elf
       - name: Install protoc (sp1-prover-types build dependency)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Build the nano job ELF (RISC-V)
+        run: |
+          (cd jobs/demo-hash/job && cargo build --release)
+          cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash-nano/program.elf
       - name: Verify the committed nano receipt
         working-directory: sp1-host
-        run: cargo run --release --bin emu -- verify ../jobs/demo-hash-nano sp1-artifacts/nano-receipt.bin sp1-artifacts/nano-vk.bin
+        run: cargo run --release --bin emu -- verify ../jobs/demo-hash-nano sp1-artifacts/nano-receipt.bin sp1-artifacts/sp1-guest-emu.elf
 
   coverage:
     # Line-coverage floor over the verification-critical crates, so
