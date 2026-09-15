@@ -471,9 +471,18 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
             let decision = match job.zk_accept.clone() {
                 Some(d) => d, // a verified zk receipt needs no consensus
                 None => match decide(&job.results, job.dispatched_ids.len()) {
-                    Decision::Escalate => Decision::Reject {
-                        reason: "no majority".into(),
-                    },
+                    // No majority and nothing left to escalate to: the
+                    // replay judge arbitrates. The true chain vindicates
+                    // honest responders (even a lone one against a pool
+                    // of no-shows) and convicts contradicting chains.
+                    Decision::Escalate => {
+                        match judge_by_replay_network(&store, &job) {
+                            Some(d) => d,
+                            None => Decision::Reject {
+                                reason: "no majority; dispute judgment failed".into(),
+                            },
+                        }
+                    }
                     other => other,
                 },
             };
@@ -816,6 +825,60 @@ fn shutdown_all(conns: &Mutex<HashMap<usize, Conn>>, reason: &str) {
     for c in conns.lock().unwrap().values() {
         let _ = c.outbound.send(ServerToClient::ShutDown { reason: reason.into() });
     }
+}
+
+/// The dispute judge: when a job completes without a majority, the
+/// coordinator re-executes it from genesis (the same thing the dispute
+/// CLI does) and lets the true chain arbitrate. Every result group
+/// whose full chain matches the replay is vindicated — accepted and
+/// rewarded; every responder whose chain contradicts the replay is
+/// proven a liar and slashed. One honest worker is rescued from a
+/// pool of no-shows; two colluding liars with DIFFERENT fabrications
+/// are convicted by their own disagreement.
+///
+/// Bounded by the job's own max_instructions budget — no unbounded
+/// verifier work. Returns None when the job cannot be materialized or
+/// replayed (operator intervention needed).
+fn judge_by_replay_network(
+    store: &contentstore::Store,
+    job: &PendingJob,
+) -> Option<Decision> {
+    let dir = std::env::temp_dir().join(format!(
+        "p2pc-judge-{}-{}",
+        std::process::id(),
+        job.descriptor.job_id
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    contentstore::materialize(&job.descriptor, store, &dir).ok()?;
+    let manifest_bytes = std::fs::read(dir.join("job.json")).ok()?;
+    let manifest: jobfmt::JobManifest = serde_json::from_slice(&manifest_bytes).ok()?;
+    let elf = std::fs::read(dir.join(&manifest.elf)).ok()?;
+    let input = std::fs::read(dir.join(&manifest.input)).ok()?;
+    let image = rvcore::elf::parse(&elf).ok()?;
+    let truth = crate::dispute::judge_by_replay(
+        &elf,
+        image.entry,
+        &input,
+        manifest.chunk_size,
+        manifest.max_instructions,
+    )?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let truth_hex: Vec<String> = truth.iter().map(|h| hex(h)).collect();
+
+    let mut agreed: Vec<String> = Vec::new();
+    let hash = truth.last().map(|h| hex(h)).unwrap_or_default();
+    let mut output_hex = None;
+    for r in &job.results {
+        if r.chunk_hashes == truth_hex {
+            if !agreed.contains(&r.worker_id) {
+                agreed.push(r.worker_id.clone());
+            }
+            if output_hex.is_none() {
+                output_hex = r.output_hex.clone();
+            }
+        }
+    }
+    Some(Decision::Accept { hash, output_hex, agreed, zk: false })
 }
 
 /// The zk receipt-claim admission gate: exactly one claim attempt per

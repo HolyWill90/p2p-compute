@@ -675,12 +675,25 @@ fn duplicate_submissions_do_not_stuff_quorum() {
     let store = contentstore::Store::open(&store_dir).unwrap();
     let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
 
-    let (bound_tx, bound_rx) = channel();
+    let (bound_tx, bound_rx) = channel::<std::net::SocketAddr>();
     let (job_tx, job_rx) = channel::<JobOutcome>();
-    let cfg = net_security_cfg(bound_tx, job_tx, jobs_dir.clone(), store_dir, 2, vec![
-        "wA".into(),
-        "wB".into(),
-    ]);
+    let cfg = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        jobs_dir: jobs_dir.clone(),
+        store_dir: store_dir.clone(),
+        per_job_deadline: std::time::Duration::from_secs(90),
+        ledger: Some(root.join("ledger.json")),
+        require_identity: true,
+        identity_pow_bits: 8,
+        zk: None,
+        pool: Some(2),
+        round1_size: None,
+        round1_ids: Some(vec!["wA".into(), "wB".into()]),
+        tls: None,
+        bound_tx: Some(bound_tx),
+        max_jobs: Some(1),
+        job_tx: Some(job_tx),
+    };
     std::thread::spawn(move || net::serve(cfg).expect("serve"));
     let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
     queue_desc(&jobs_dir, "job1", &desc);
@@ -711,12 +724,21 @@ fn duplicate_submissions_do_not_stuff_quorum() {
     }
 
     let job1 = wait_job(&job_rx);
-    match &job1.decision {
-        coordinator::Decision::Reject { reason } => {
-            assert!(reason.contains("no majority"), "got: {reason}");
-        }
-        other => panic!("duplicates must not manufacture an accept, got {other:?}"),
-    }
+    // The duplicate was dropped (wA votes once), and with no majority
+    // the replay judge arbitrates: the true chain vindicates wA and
+    // convicts wB — no bare reject, the liar is proven and slashed.
+    let coordinator::Decision::Accept { hash, agreed, zk, .. } = &job1.decision else {
+        panic!("judge should vindicate the honest worker, got {:?}", job1.decision);
+    };
+    assert!(!*zk, "resolved by dispute judgment, not a zk receipt");
+    assert_eq!(
+        hash,
+        "67925f935808b41f326dd1f183e8e2951ac8d01f647e0d987f2cefa8944879b5"
+    );
+    assert_eq!(agreed, &vec!["wA".to_string()]);
+    let ledger = std::fs::read_to_string(root.join("ledger.json")).unwrap();
+    assert!(ledger.contains("\"wB\": -100"), "liar slashed: {ledger}");
+    assert!(ledger.contains("\"wA\": 10"), "honest rewarded: {ledger}");
     for h in handles {
         h.join().unwrap().unwrap();
     }
@@ -813,4 +835,92 @@ fn zk_receipt_claim_accepts_job() {
         "00d58a79c3534d62fd37b04e9e934e412b717b70c26a851a9d2587d9f8bd2ce5"
     );
     handle.join().unwrap().unwrap();
+}
+
+/// The dispute judge against full collusion: two workers fabricate
+/// DIFFERENT results (no majority, no honest vote to lean on), and the
+/// coordinator's replay produces a chain matching NEITHER — both are
+/// convicted by their own disagreement with the re-execution.
+#[test]
+fn dispute_judge_convicts_diverging_fabrications() {
+    let smoke_elf = std::path::Path::new("../../jobs/demo-hash-smoke/program.elf");
+    if !smoke_elf.exists() {
+        eprintln!("SKIP: build the demo-hash-smoke job first");
+        return;
+    }
+    let root = temp_dir("p2pc-net-judge");
+    let jobs_dir = root.join("jobs");
+    let store_dir = root.join("store");
+    std::fs::create_dir_all(&jobs_dir).unwrap();
+    let store = contentstore::Store::open(&store_dir).unwrap();
+    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-smoke"), &store).unwrap();
+
+    let (bound_tx, bound_rx) = channel::<std::net::SocketAddr>();
+    let (job_tx, job_rx) = channel::<JobOutcome>();
+    let cfg = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        jobs_dir: jobs_dir.clone(),
+        store_dir: store_dir.clone(),
+        per_job_deadline: std::time::Duration::from_secs(90),
+        ledger: Some(root.join("ledger.json")),
+        require_identity: true,
+        identity_pow_bits: 8,
+        zk: None,
+        pool: Some(2),
+        round1_size: None,
+        round1_ids: Some(vec!["wA".into(), "wB".into()]),
+        tls: None,
+        bound_tx: Some(bound_tx),
+        max_jobs: Some(1),
+        job_tx: Some(job_tx),
+    };
+    std::thread::spawn(move || net::serve(cfg).expect("serve"));
+    let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+    queue_desc(&jobs_dir, "job1", &desc);
+
+    let identities = root.join("identities");
+    std::fs::create_dir_all(&identities).unwrap();
+    let mut handles = Vec::new();
+    // Both lie, with DIFFERENT fabricated tails — no majority, and the
+    // replay matches neither fabrication.
+    let spawns: Vec<(&str, bool, Option<u8>)> =
+        vec![("wA", true, Some(3)), ("wB", true, Some(7))];
+    for (id, corrupt, byte) in spawns {
+        let server = bound.to_string();
+        let identity = identities.join(format!("{id}.key"));
+        let store_dir = root.join(format!("worker-store-{id}"));
+        handles.push(std::thread::spawn(move || {
+            run_daemon(&DaemonConfig {
+                server,
+                worker_id: id.into(),
+                identity_path: Some(identity),
+                store_dir,
+                listen_port: None,
+                tls: None,
+                corrupt,
+                corrupt_byte: byte,
+                extra_submits: 0,
+                receipt_file: None,
+            })
+        }));
+    }
+
+    let job1 = wait_job(&job_rx);
+    let coordinator::Decision::Accept { hash, agreed, zk, .. } = &job1.decision else {
+        panic!("judge should resolve the job, got {:?}", job1.decision);
+    };
+    assert!(!*zk);
+    // The judge reports the TRUE result...
+    assert_eq!(
+        hash,
+        "67925f935808b41f326dd1f183e8e2951ac8d01f647e0d987f2cefa8944879b5"
+    );
+    // ...and vindicates nobody: both fabrications contradicted it.
+    assert!(agreed.is_empty(), "both liars must be convicted: {agreed:?}");
+    let ledger = std::fs::read_to_string(root.join("ledger.json")).unwrap();
+    assert!(ledger.contains("\"wA\": -100") && ledger.contains("\"wB\": -100"),
+        "both liars slashed: {ledger}");
+    for h in handles {
+        h.join().unwrap().unwrap();
+    }
 }
