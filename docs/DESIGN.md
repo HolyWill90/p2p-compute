@@ -271,6 +271,17 @@ Stated as tests (`crates/coordinator/tests/collusion.rs`), not prose claims:
   snapshots cost 2.11 MB per chunk (69.6 MB for the 2 MiB-input demo —
   proportional to the job's memory footprint, an honest scaling limit for
   large-working-set jobs).
+- **UPDATE (2026-09-15) — page-table memory, 5× throughput**: the
+  sparse memory's page map was a BTreeMap — every instruction paid
+  1-2 O(log n) pointer-chasing lookups (fetch + load/store), making
+  the interpreter memory-latency-bound. The page map is now a flat
+  lazily-grown index (page number -> slot), O(1) per access, with the
+  canonical page iteration order preserved byte-for-byte (the Merkle
+  root, snapshots and every pinned hash are unchanged — the
+  differentials, the 67/67 suite and all hash pins verify it). Result:
+  the 33.5M-instruction demo job runs in ~0.29s end-to-end
+  (~115M instructions/sec, ~5×), and the zk guest inherits the same
+  improvement (fewer zkVM cycles per emulated instruction).
 - **Known untested adversaries** (for the networked phase): result-copying
   between workers (mitigation: per-worker input nonces with commit-reveal),
   Sybil identity farming (mitigation: stake-weighted identity), and
