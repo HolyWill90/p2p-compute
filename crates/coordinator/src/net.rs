@@ -127,6 +127,10 @@ struct PendingJob {
     /// Set when a verified zk receipt claim arrives: the job accepts
     /// on this decision alone (no quorum threshold applies).
     zk_accept: Option<Decision>,
+    /// Workers that have submitted a receipt claim, verified or not:
+    /// one attempt per dispatched worker, so a rejected or slow claim
+    /// cannot be repeated to stall the verifier again and again.
+    receipt_claimed: Vec<String>,
 }
 
 pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
@@ -250,6 +254,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                     results: Vec::new(),
                     started: Instant::now(),
                     zk_accept: None,
+                    receipt_claimed: Vec::new(),
                 });
             }
         }
@@ -442,6 +447,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                         results: std::mem::take(&mut job.results),
                         started: job.started,
                         zk_accept: job.zk_accept.take(),
+                        receipt_claimed: job.receipt_claimed.clone(),
                     });
                 } else if job.started.elapsed() > cfg.per_job_deadline {
                     job_finished = Some(PendingJob {
@@ -455,6 +461,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                         results: std::mem::take(&mut job.results),
                         started: job.started,
                         zk_accept: job.zk_accept.take(),
+                        receipt_claimed: job.receipt_claimed.clone(),
                     });
                 }
             }
@@ -826,6 +833,15 @@ fn handle_receipt_claim(
         eprintln!("SECURITY: receipt claim dropped — zk tier not configured");
         return;
     };
+    // Size gate BEFORE decoding: hex decode doubles the allocation,
+    // so an unbounded claim must be refused on its encoded length.
+    if receipt_hex.len() > 2 * crate::receipt::MAX_RECEIPT_BYTES {
+        eprintln!(
+            "SECURITY: receipt claim from {worker_id} dropped — {} hex chars exceeds the limit",
+            receipt_hex.len()
+        );
+        return;
+    }
     let receipt_bytes = match jobfmt::from_hex(receipt_hex, receipt_hex.len() / 2) {
         Ok(b) => b,
         Err(e) => {
@@ -849,6 +865,14 @@ fn handle_receipt_claim(
         );
         return;
     }
+    // One receipt-claim attempt per dispatched worker: the attempt is
+    // consumed whether the verification succeeds or fails, so a
+    // rejected claim cannot be replayed to re-stall the verifier.
+    if job.receipt_claimed.iter().any(|id| id == worker_id) {
+        eprintln!("SECURITY: repeat receipt claim from {worker_id} dropped");
+        return;
+    }
+    job.receipt_claimed.push(worker_id.to_string());
     let decode32 = |h: &str| -> Result<[u8; 32], String> {
         jobfmt::from_hex(h, 32)
             .map_err(|e| format!("descriptor hash: {e}"))?
