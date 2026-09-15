@@ -17,7 +17,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wire::{ClientToServer, ServerToClient};
 
-#[derive(Clone)]
+/// External zk verifier configuration: the binary (built from
+/// sp1-host) and the committed guest ELF whose verifying key
+/// re-derives the receipt check.
+#[derive(Debug, Clone)]
+pub struct ZkVerify {
+    pub cmd: String,
+    pub guest_elf: PathBuf,
+}
+
 pub struct ServeConfig {
     pub bind: SocketAddr,
     /// Watched for new `*.desc.json` job descriptors. A descriptor
@@ -29,6 +37,10 @@ pub struct ServeConfig {
     pub per_job_deadline: Duration,
     pub ledger: Option<PathBuf>,
     pub require_identity: bool,
+    /// zk tier: when set, authenticated workers may submit SP1 receipt
+    /// claims, verified by an external verifier binary. None = receipt
+    /// claims are refused.
+    pub zk: Option<ZkVerify>,
     /// Admission proof-of-work difficulty in leading-zero bits (0
     /// disables). The fresh per-connection nonce forces the work to be
     /// redone on every reconnect, which is what makes bans and
@@ -75,6 +87,14 @@ enum Event {
         listen_port: Option<u16>,
     },
     NonceSig { conn: usize, sig: Option<String>, pow_counter: u64 },
+    ReceiptClaim {
+        conn: usize,
+        worker_id: String,
+        job_id: String,
+        pubkey_hex: String,
+        sig_hex: String,
+        receipt_hex: String,
+    },
     BlobRequest { conn: usize, id: String },
     Result { conn: usize, result: WorkerResult },
     Closed { conn: usize },
@@ -104,6 +124,9 @@ struct PendingJob {
     reserves: Vec<String>,
     results: Vec<WorkerResult>,
     started: Instant,
+    /// Set when a verified zk receipt claim arrives: the job accepts
+    /// on this decision alone (no quorum threshold applies).
+    zk_accept: Option<Decision>,
 }
 
 pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
@@ -226,6 +249,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                     reserves: Vec::new(),
                     results: Vec::new(),
                     started: Instant::now(),
+                    zk_accept: None,
                 });
             }
         }
@@ -360,10 +384,11 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
         let mut job_finished: Option<PendingJob> = None;
         if let Some(job) = &mut pending {
             if job.dispatched {
-                let all_in = job.dispatched_ids.iter().all(|id| {
-                    job.results.iter().any(|r| &r.worker_id == id)
-                });
-                if all_in {
+                let all_in = job.zk_accept.is_some()
+                    || job.dispatched_ids.iter().all(|id| {
+                        job.results.iter().any(|r| &r.worker_id == id)
+                    });
+                if job.zk_accept.is_some() || all_in {
                     // No majority and reserves remain → escalate to
                     // them (dispatch the held-back workers) instead of
                     // finishing.
@@ -416,6 +441,7 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                         reserves: Vec::new(),
                         results: std::mem::take(&mut job.results),
                         started: job.started,
+                        zk_accept: job.zk_accept.take(),
                     });
                 } else if job.started.elapsed() > cfg.per_job_deadline {
                     job_finished = Some(PendingJob {
@@ -428,17 +454,21 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                         reserves: Vec::new(),
                         results: std::mem::take(&mut job.results),
                         started: job.started,
+                        zk_accept: job.zk_accept.take(),
                     });
                 }
             }
         }
         if let Some(job) = job_finished {
             let job_id = job.descriptor.job_id.clone();
-            let decision = match decide(&job.results, job.dispatched_ids.len()) {
-                Decision::Escalate => Decision::Reject {
-                    reason: "no majority".into(),
+            let decision = match job.zk_accept.clone() {
+                Some(d) => d, // a verified zk receipt needs no consensus
+                None => match decide(&job.results, job.dispatched_ids.len()) {
+                    Decision::Escalate => Decision::Reject {
+                        reason: "no majority".into(),
+                    },
+                    other => other,
                 },
-                other => other,
             };
             eprintln!(
                 "[net] job finished: {} results, dispatched [{}], reserves [{}], decision {:?}",
@@ -637,6 +667,45 @@ pub fn serve(cfg: ServeConfig) -> Result<ServeOutcome, String> {
                     }
                 }
             }
+            Event::ReceiptClaim {
+                conn,
+                worker_id,
+                job_id,
+                pubkey_hex,
+                sig_hex,
+                receipt_hex,
+            } => {
+                // zk tier: identity gate first (same rules as results).
+                let mut map = conns.lock().unwrap();
+                let Some(c) = map.get_mut(&conn) else {
+                    eprintln!("SECURITY: receipt claim from unknown conn {conn} dropped");
+                    continue;
+                };
+                if !c.authed {
+                    eprintln!(
+                        "SECURITY: receipt claim from unauthenticated conn {conn} dropped"
+                    );
+                    continue;
+                }
+                if worker_id != c.worker_id {
+                    eprintln!(
+                        "SECURITY: receipt claim worker id mismatch on conn {conn}: claimed {worker_id}, authenticated as {}",
+                        c.worker_id
+                    );
+                    continue;
+                }
+                if let (Some(pk), claimed) = (&c.pubkey, &pubkey_hex) {
+                    if pk != claimed {
+                        eprintln!("SECURITY: receipt claim key mismatch on conn {conn}");
+                        continue;
+                    }
+                }
+                drop(map);
+                handle_receipt_claim(
+                    &cfg, &mut pending, &worker_id, &job_id, &pubkey_hex, &sig_hex,
+                    &receipt_hex,
+                );
+            }
             Event::Closed { conn } => {
                 let wid = conns.lock().unwrap().get(&conn).map(|c| c.worker_id.clone());
                 println!(
@@ -742,6 +811,116 @@ fn shutdown_all(conns: &Mutex<HashMap<usize, Conn>>, reason: &str) {
     }
 }
 
+/// Validate and (via the external verifier) check a zk receipt claim,
+/// then mark the pending job as accepted on the proof alone.
+fn handle_receipt_claim(
+    cfg: &ServeConfig,
+    pending: &mut Option<PendingJob>,
+    worker_id: &str,
+    job_id: &str,
+    pubkey_hex: &str,
+    sig_hex: &str,
+    receipt_hex: &str,
+) {
+    let Some(zk) = &cfg.zk else {
+        eprintln!("SECURITY: receipt claim dropped — zk tier not configured");
+        return;
+    };
+    let receipt_bytes = match jobfmt::from_hex(receipt_hex, receipt_hex.len() / 2) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("SECURITY: receipt claim {worker_id}: bad hex ({e})");
+            return;
+        }
+    };
+    let receipt_hash: [u8; 32] = blake3::hash(&receipt_bytes).into();
+    if let Err(e) = verify_claim_sig(pubkey_hex, job_id, &receipt_hash, sig_hex) {
+        eprintln!("SECURITY: receipt claim signature invalid ({worker_id}): {e}");
+        return;
+    }
+
+    let Some(job) = pending.as_mut() else { return };
+    if job_id != job.descriptor.job_id || job.zk_accept.is_some() {
+        return;
+    }
+    if !job.dispatched_ids.iter().any(|id| id == worker_id) {
+        eprintln!(
+            "SECURITY: receipt claim from non-dispatched worker {worker_id} dropped"
+        );
+        return;
+    }
+    let decode32 = |h: &str| -> Result<[u8; 32], String> {
+        jobfmt::from_hex(h, 32)
+            .map_err(|e| format!("descriptor hash: {e}"))?
+            .try_into()
+            .map_err(|_| "descriptor hash length".to_string())
+    };
+    let expected_binding = [
+        match decode32(&job.descriptor.manifest) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("SECURITY: {e}");
+                return;
+            }
+        },
+        match decode32(&job.descriptor.elf) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("SECURITY: {e}");
+                return;
+            }
+        },
+        match decode32(&job.descriptor.input) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("SECURITY: {e}");
+                return;
+            }
+        },
+    ];
+    match crate::receipt::verify_receipt(&zk.cmd, &receipt_bytes, &expected_binding, &zk.guest_elf)
+    {
+        Ok(outcome) if outcome.status == 0 => {
+            let hash = outcome.chunk_hashes.last().cloned().unwrap_or_default();
+            println!(
+                "zk receipt verified: {worker_id} → {} ({} instructions)",
+                &hash[..12.min(hash.len())],
+                outcome.instructions
+            );
+            job.zk_accept = Some(Decision::Accept {
+                hash,
+                output_hex: Some(outcome.output_hex),
+                agreed: vec![worker_id.to_string()],
+                zk: true,
+            });
+        }
+        Ok(outcome) => {
+            eprintln!("zk receipt from {worker_id} reports failure status {}", outcome.status);
+        }
+        Err(e) => {
+            eprintln!("SECURITY: invalid receipt claim ({worker_id}): {e}");
+        }
+    }
+}
+
+/// Verify a zk receipt claim's signature: the worker signs
+/// `receipt_claim_message(job_id, blake3(receipt))`, binding the
+/// identity to the specific receipt and job.
+fn verify_claim_sig(
+    pubkey_hex: &str,
+    job_id: &str,
+    receipt_hash: &[u8; 32],
+    sig_hex: &str,
+) -> Result<(), String> {
+    let pk_bytes = jobfmt::from_hex(pubkey_hex, 32).map_err(|e| format!("pubkey: {e}"))?;
+    let sig_bytes = jobfmt::from_hex(sig_hex, 64).map_err(|e| format!("signature: {e}"))?;
+    let vk = VerifyingKey::from_bytes(&pk_bytes.try_into().unwrap())
+        .map_err(|e| format!("pubkey: {e}"))?;
+    let sig = Signature::from_bytes(&sig_bytes.try_into().unwrap());
+    let msg = jobfmt::receipt_claim_message(job_id, receipt_hash);
+    vk.verify(&msg, &sig).map_err(|e| format!("signature: {e}"))
+}
+
 fn verify_nonce(pubkey_hex: &str, nonce_hex: &[u8], sig_hex: &str) -> Result<(), String> {
     // The pubkey and signature strings arrive over the wire BEFORE the
     // sender is authenticated: decoding must never panic (no index
@@ -805,6 +984,23 @@ fn session_loop(
             }
             Ok(Some(ClientToServer::JobResult { result })) => {
                 tx.send(Event::Result { conn, result }).ok();
+            }
+            Ok(Some(ClientToServer::ReceiptClaim {
+                worker_id,
+                job_id,
+                pubkey_hex,
+                sig_hex,
+                receipt_hex,
+            })) => {
+                tx.send(Event::ReceiptClaim {
+                    conn,
+                    worker_id,
+                    job_id,
+                    pubkey_hex,
+                    sig_hex,
+                    receipt_hex,
+                })
+                .ok();
             }
             Ok(None) => {
                 // Idle window: push anything the main loop queued.

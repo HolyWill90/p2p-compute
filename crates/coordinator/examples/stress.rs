@@ -37,6 +37,7 @@ fn main() {
         ledger: None,
         require_identity: true,
         identity_pow_bits: 0,
+        zk: None,
         round1_ids: None,
         pool: Some(2),
         round1_size: None,
@@ -75,6 +76,7 @@ fn main() {
                 corrupt: false,
                 corrupt_byte: None,
                 extra_submits: 0,
+                receipt_file: None,
             };
             let mut drops = 0usize;
             loop {

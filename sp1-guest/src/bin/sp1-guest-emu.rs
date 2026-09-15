@@ -23,6 +23,17 @@ fn main() {
     let manifest: jobfmt::JobManifest =
         serde_json::from_slice(&manifest_bytes).expect("manifest");
 
+    // Job binding: commit the content hashes of (manifest, elf, input)
+    // BEFORE executing. The content store's ids are plain BLAKE3 over
+    // each blob, so a coordinator holding a descriptor can check the
+    // receipt attests THIS job — not merely "some" execution.
+    let binding: [[u8; 32]; 3] = [
+        blake3::hash(&manifest_bytes).into(),
+        blake3::hash(&elf_bytes).into(),
+        blake3::hash(&input).into(),
+    ];
+    sp1_zkvm::io::commit::<[[u8; 32]; 3]>(&binding);
+
     let image = elf::parse(&elf_bytes).expect("elf");
     let mut mem = Mem::new();
     elf::load(&mut mem, &image).expect("load");

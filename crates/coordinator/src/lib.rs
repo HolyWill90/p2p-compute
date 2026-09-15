@@ -2,6 +2,7 @@ pub mod dispute;
 pub mod ledger;
 pub mod net;
 pub mod optimistic;
+pub mod receipt;
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use jobfmt::WorkerResult;
@@ -9,7 +10,8 @@ use jobfmt::WorkerResult;
 /// Quorum decision over a pool of worker results.
 ///
 /// This is the budget tier of verification: it never proves a result
-/// correct. It bounds the probability of accepting a wrong answer by
+/// correct (unless `zk` is set — a verified SP1 receipt over the
+/// emulator itself needs no consensus at all). It bounds the probability of accepting a wrong answer by
 /// independent random sampling (P(all N sampled workers collude) =
 /// f^N for a cheating fraction f) and makes detected fraud
 /// economically irrational via bonds. The zk tier is what removes the
@@ -17,7 +19,10 @@ use jobfmt::WorkerResult;
 #[derive(Debug, Clone)]
 pub enum Decision {
     /// Majority hash + the output of the agreeing group + worker ids.
-    Accept { hash: String, output_hex: Option<String>, agreed: Vec<String> },
+    /// `zk` marks an acceptance made on a verified SP1 receipt: one
+    /// cryptographic proof replaces the worker consensus, and the
+    /// quorum threshold does not apply.
+    Accept { hash: String, output_hex: Option<String>, agreed: Vec<String>, zk: bool },
     /// Initial pool was inconclusive; add more workers (escalation).
     Escalate,
     /// No majority in the full pool, or a majority of failed runs:
@@ -82,6 +87,7 @@ pub fn decide(pool_results: &[WorkerResult], expected_pool: usize) -> Decision {
                     hash: hash.clone(),
                     output_hex: group[0].output_hex.clone(),
                     agreed: group.iter().map(|r| r.worker_id.clone()).collect(),
+                    zk: false,
                 };
             } else {
                 return Decision::Reject {

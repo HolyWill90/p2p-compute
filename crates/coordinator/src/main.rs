@@ -170,6 +170,15 @@ struct ServeArgs {
     /// roughly a tenth of a second of hashing per connection).
     #[arg(long, default_value_t = 20)]
     identity_pow_bits: u32,
+    /// zk tier: the external receipt-verifier binary (built from
+    /// sp1-host). When set together with --zk-guest-elf, authenticated
+    /// workers may submit SP1 receipt claims for immediate acceptance.
+    #[arg(long)]
+    zk_verify_cmd: Option<String>,
+    /// zk tier: the committed guest ELF the verifier re-derives the
+    /// verifying key from (sp1-artifacts/sp1-guest-emu.elf).
+    #[arg(long)]
+    zk_guest_elf: Option<PathBuf>,
     #[arg(long)]
     store: PathBuf,
     #[arg(long)]
@@ -213,6 +222,13 @@ fn cmd_serve(args: ServeArgs) {
         ledger: args.ledger,
         require_identity: true,
         identity_pow_bits: args.identity_pow_bits,
+        zk: match (&args.zk_verify_cmd, &args.zk_guest_elf) {
+            (Some(cmd), Some(elf)) => Some(net::ZkVerify {
+                cmd: cmd.clone(),
+                guest_elf: elf.clone(),
+            }),
+            _ => None,
+        },
         pool: Some(args.pool),
         round1_size: args.sample_size,
         round1_ids: args

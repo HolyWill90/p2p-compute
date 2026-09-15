@@ -9,6 +9,18 @@
 use sp1_sdk::blocking::{Elf, ProveRequest, Prover, ProverClient, SP1Stdin};
 use sp1_sdk::ProvingKey;
 
+fn job_binding(
+    manifest_bytes: &[u8],
+    elf_bytes: &[u8],
+    input: &[u8],
+) -> [[u8; 32]; 3] {
+    [
+        blake3::hash(manifest_bytes).into(),
+        blake3::hash(elf_bytes).into(),
+        blake3::hash(input).into(),
+    ]
+}
+
 fn local_reference(
     manifest_bytes: &[u8],
     elf_bytes: &[u8],
@@ -79,6 +91,11 @@ fn main() {
         let pk = prover
             .setup(Elf::Dynamic(guest_bytes.into()))
             .expect("setup from committed guest ELF");
+        // The journal opens with the job binding: BLAKE3 of each blob,
+        // which ARE the content-store ids the descriptor carries.
+        let binding_zk: [[u8; 32]; 3] = proof.public_values.read();
+        let expected_binding = job_binding(&manifest_bytes, &elf_bytes, &input);
+        assert_eq!(binding_zk, expected_binding, "receipt is not for this job's (manifest, elf, input)");
         let status_zk: u32 = proof.public_values.read();
         let instructions_zk: u64 = proof.public_values.read();
         let chain_zk: Vec<[u8; 32]> = proof.public_values.read();
@@ -109,6 +126,12 @@ fn main() {
 
     if mode == "execute" {
         let (mut pv, _report) = prover.execute(elf.clone(), stdin).run().expect("execute");
+        let binding_zk: [[u8; 32]; 3] = pv.read();
+        assert_eq!(
+            binding_zk,
+            job_binding(&manifest_bytes, &elf_bytes, &input),
+            "receipt is not for this job's (manifest, elf, input)"
+        );
         let status_zk: u32 = pv.read();
         let instructions_zk: u64 = pv.read();
         let chain_zk: Vec<[u8; 32]> = pv.read();
@@ -126,6 +149,12 @@ fn main() {
     // shard await a newer SP1 or the GPU prover. Core is tried first
     // here as the more permissive path.
     let mut proof = prover.prove(&pk, stdin).core().run().expect("proving");
+    let binding_zk: [[u8; 32]; 3] = proof.public_values.read();
+    assert_eq!(
+        binding_zk,
+        job_binding(&manifest_bytes, &elf_bytes, &input),
+        "receipt is not for this job's (manifest, elf, input)"
+    );
     let status_zk: u32 = proof.public_values.read();
     let instructions_zk: u64 = proof.public_values.read();
     let chain_zk: Vec<[u8; 32]> = proof.public_values.read();

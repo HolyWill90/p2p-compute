@@ -149,6 +149,18 @@ pub fn signing_message(r: &WorkerResult) -> Vec<u8> {
     m
 }
 
+/// The bytes a worker signs when submitting a zk receipt claim:
+/// length-prefixed job id + BLAKE3 of the raw receipt bytes. Binds the
+/// identity to the specific receipt and job (the receipt itself is
+/// cryptographically verified separately by the coordinator).
+pub fn receipt_claim_message(job_id: &str, receipt_hash: &[u8; 32]) -> Vec<u8> {
+    let mut m = Vec::new();
+    m.extend_from_slice(&(job_id.len() as u32).to_le_bytes());
+    m.extend_from_slice(job_id.as_bytes());
+    m.extend_from_slice(receipt_hash);
+    m
+}
+
 /// Hex decode failure: which string shape was rejected and why.
 #[derive(Debug)]
 pub enum HexError {
