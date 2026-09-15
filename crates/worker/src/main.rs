@@ -67,6 +67,11 @@ struct DaemonArgs {
     /// so two lying workers can fabricate DIFFERENT wrong results.
     #[arg(long)]
     corrupt_byte: Option<u8>,
+    /// zk tier: submit this SP1 receipt (bincode) as a ReceiptClaim
+    /// when a matching job is assigned, instead of executing. The
+    /// receipt is produced by a prover; the daemon carries it signed.
+    #[arg(long)]
+    receipt_file: Option<PathBuf>,
     /// Serve blobs to peers on this port (the p2p fetch path).
     #[arg(long)]
     listen_port: Option<u16>,
@@ -123,6 +128,7 @@ fn main() {
                 corrupt: a.corrupt,
                 corrupt_byte: a.corrupt_byte,
                 extra_submits: 0,
+                receipt_file: a.receipt_file,
             };
             if let Err(e) = worker::daemon::run_daemon(&cfg) {
                 eprintln!("daemon error: {e}");

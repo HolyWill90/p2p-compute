@@ -226,6 +226,7 @@ dependencies = [
 name = "coordinator"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "clap",
  "contentstore",
  "ed25519-dalek",
@@ -909,6 +910,7 @@ name = "worker"
 version = "0.1.0"
 dependencies = [
  "abi",
+ "blake3",
  "clap",
  "contentstore",
  "ed25519-dalek",

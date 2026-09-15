@@ -160,6 +160,16 @@ pub enum ClientToServer {
     BlobRequest { id_hex: String },
     /// A completed, signed execution result.
     JobResult { result: jobfmt::WorkerResult },
+    /// A zk receipt claim: the worker attaches a verified SP1 receipt
+    /// for the whole job (hex of the bincode-serialized receipt). The
+    /// signature is over `jobfmt::receipt_claim_message`.
+    ReceiptClaim {
+        worker_id: String,
+        job_id: String,
+        pubkey_hex: String,
+        sig_hex: String,
+        receipt_hex: String,
+    },
 }
 
 /// Messages sent by the coordinator to a worker.

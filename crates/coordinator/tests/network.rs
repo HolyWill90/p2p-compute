@@ -66,6 +66,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
         ledger: Some(root.join("ledger.json")),
         require_identity: true,
         identity_pow_bits: 0,
+        zk: None,
         round1_ids: None,
         pool: Some(2),
         round1_size: None,
@@ -105,6 +106,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
                 corrupt: false,
                 corrupt_byte: None,
                 extra_submits: 0,
+                receipt_file: None,
             })
         }));
     }
@@ -123,6 +125,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
                 corrupt: false,
                 corrupt_byte: None,
                 extra_submits: 0,
+                receipt_file: None,
             })
         }));
     }
@@ -165,6 +168,7 @@ fn multi_job_session_with_p2p_blob_exchange() {
                 corrupt: false,
                 corrupt_byte: None,
                 extra_submits: 0,
+                receipt_file: None,
             })
         }));
     }
@@ -234,6 +238,7 @@ fn tls_network_session() {
         ledger: Some(root.join("ledger.json")),
         require_identity: true,
         identity_pow_bits: 0,
+        zk: None,
         round1_ids: None,
         pool: Some(2),
         round1_size: None,
@@ -284,6 +289,7 @@ fn tls_network_session() {
                 corrupt: false,
                 corrupt_byte: None,
                 extra_submits: 0,
+                receipt_file: None,
             })
         }));
     }
@@ -337,6 +343,7 @@ fn reserve_escalation_beats_lying_worker() {
         ledger: Some(root.join("ledger.json")),
         require_identity: true,
         identity_pow_bits: 0,
+        zk: None,
         pool: Some(3),
         round1_size: None,
         round1_ids: Some(vec!["wA".into(), "wB".into()]),
@@ -377,6 +384,7 @@ fn reserve_escalation_beats_lying_worker() {
                 corrupt,
                 corrupt_byte: byte,
                 extra_submits: 0,
+                receipt_file: None,
             })
         }));
     }
@@ -421,6 +429,7 @@ fn partial_descriptor_write_does_not_kill_server() {
         ledger: None,
         require_identity: true,
         identity_pow_bits: 0,
+        zk: None,
         pool: Some(1),
         round1_size: None,
         round1_ids: None,
@@ -452,6 +461,7 @@ fn partial_descriptor_write_does_not_kill_server() {
             corrupt: false,
             corrupt_byte: None,
             extra_submits: 0,
+            receipt_file: None,
         })
     });
 
@@ -564,6 +574,7 @@ fn net_security_cfg(
         ledger: None,
         require_identity: true,
         identity_pow_bits: 8,
+        zk: None,
         pool: Some(pool),
         round1_size: None,
         round1_ids: Some(round1),
@@ -620,6 +631,7 @@ fn non_dispatched_worker_cannot_vote() {
                 corrupt: false,
                 corrupt_byte: None,
                 extra_submits: 0,
+                receipt_file: None,
             })
         }));
     }
@@ -693,6 +705,7 @@ fn duplicate_submissions_do_not_stuff_quorum() {
                 corrupt,
                 corrupt_byte: byte,
                 extra_submits: extra,
+                receipt_file: None,
             })
         }));
     }
@@ -707,4 +720,97 @@ fn duplicate_submissions_do_not_stuff_quorum() {
     for h in handles {
         h.join().unwrap().unwrap();
     }
+}
+
+
+/// zk tier end to end: a receipt-carrier worker submits a signed SP1
+/// receipt claim; the coordinator verifies it via the external
+/// verifier binary and accepts the job on the proof alone. Skipped
+/// unless the verifier binary, receipt and guest ELF are available
+/// (CI's zk-receipt job builds and provides all three).
+#[test]
+fn zk_receipt_claim_accepts_job() {
+    let (verify_cmd, guest_elf) = match (
+        std::env::var("P2PC_ZK_VERIFY"),
+        std::env::var("P2PC_ZK_GUEST_ELF"),
+    ) {
+        (Ok(v), Ok(g)) if std::path::Path::new(&v).exists() => (v, g),
+        _ => {
+            eprintln!("SKIP: zk verifier binary or guest ELF not available");
+            return;
+        }
+    };
+    let receipt_file =
+        std::path::Path::new("../../sp1-artifacts/nano-receipt.bin");
+    if !receipt_file.exists() {
+        eprintln!("SKIP: committed nano receipt missing");
+        return;
+    }
+
+    let root = temp_dir("p2pc-net-zk");
+    let jobs_dir = root.join("jobs");
+    let store_dir = root.join("store");
+    std::fs::create_dir_all(&jobs_dir).unwrap();
+    let store = contentstore::Store::open(&store_dir).unwrap();
+    let desc = contentstore::publish(&PathBuf::from("../../jobs/demo-hash-nano"), &store).unwrap();
+
+    let (bound_tx, bound_rx) = channel();
+    let (job_tx, job_rx) = channel::<JobOutcome>();
+    let cfg = ServeConfig {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        jobs_dir: jobs_dir.clone(),
+        store_dir: store_dir.clone(),
+        per_job_deadline: std::time::Duration::from_secs(90),
+        ledger: None,
+        require_identity: true,
+        identity_pow_bits: 8,
+        zk: Some(net::ZkVerify {
+            cmd: verify_cmd,
+            guest_elf: PathBuf::from(guest_elf),
+        }),
+        pool: Some(1),
+        round1_size: None,
+        round1_ids: None,
+        tls: None,
+        bound_tx: Some(bound_tx),
+        max_jobs: Some(1),
+        job_tx: Some(job_tx),
+    };
+    std::thread::spawn(move || net::serve(cfg).expect("serve"));
+    let bound = bound_rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+    queue_desc(&jobs_dir, "job1", &desc);
+
+    // The receipt carrier: never executes, just presents the proof.
+    let identities = root.join("identities");
+    std::fs::create_dir_all(&identities).unwrap();
+    let server = bound.to_string();
+    let identity = identities.join("wA.key");
+    let store_dir = root.join("worker-store-wA");
+    let receipt_file = receipt_file.to_path_buf();
+    let handle = std::thread::spawn(move || {
+        run_daemon(&DaemonConfig {
+            server,
+            worker_id: "wA".into(),
+            identity_path: Some(identity),
+            store_dir,
+            listen_port: None,
+            tls: None,
+            corrupt: false,
+            corrupt_byte: None,
+            extra_submits: 0,
+            receipt_file: Some(receipt_file),
+        })
+    });
+
+    let job1 = wait_job(&job_rx);
+    let coordinator::Decision::Accept { hash, agreed, zk, .. } = &job1.decision else {
+        panic!("receipt claim should accept the job, got {:?}", job1.decision);
+    };
+    assert!(*zk, "acceptance must be zk-backed");
+    assert_eq!(agreed, &vec!["wA".to_string()]);
+    assert_eq!(
+        hash,
+        "00d58a79c3534d62fd37b04e9e934e412b717b70c26a851a9d2587d9f8bd2ce5"
+    );
+    handle.join().unwrap().unwrap();
 }

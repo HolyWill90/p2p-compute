@@ -32,6 +32,11 @@ pub struct DaemonConfig {
     /// Test hook: submit the result this many EXTRA times, emulating a
     /// worker trying to stuff the quorum with duplicate votes.
     pub extra_submits: u8,
+    /// Path to an SP1 receipt (bincode) for the assigned job: when set
+    /// and the assignment matches, the daemon submits a ReceiptClaim
+    /// (the zk tier) instead of executing. The receipt is usually
+    /// produced by a dedicated prover; the daemon just carries it.
+    pub receipt_file: Option<PathBuf>,
     /// When set: the coordinator's certificate (DER) — the session
     /// runs over TLS pinned to this certificate's fingerprint.
     pub tls: Option<Vec<u8>>,
@@ -407,6 +412,39 @@ fn session_once(
                         eprintln!("[{}] blob fetch failed: {e} — connection lost", cfg.worker_id);
                         return Ok((SessionEnd::ConnectionLost, stats_snapshot(counters)));
                     }
+                }
+
+                // zk tier: a receipt carrier submits the proof instead
+                // of executing. The claim is signed over the receipt's
+                // hash, so the identity cannot be detached from it.
+                if let Some(path) = &cfg.receipt_file {
+                    let receipt_bytes = std::fs::read(path)
+                        .map_err(|e| format!("receipt file: {e}"))?;
+                    let receipt_hash: [u8; 32] =
+                        blake3::hash(&receipt_bytes).into();
+                    let sig = signing_key
+                        .as_ref()
+                        .ok_or("receipt claims require --identity")?
+                        .sign(&jobfmt::receipt_claim_message(&descriptor.job_id, &receipt_hash));
+                    wire::send(
+                        &mut stream,
+                        &ClientToServer::ReceiptClaim {
+                            worker_id: cfg.worker_id.clone(),
+                            job_id: descriptor.job_id.clone(),
+                            pubkey_hex: hex(&signing_key.as_ref().unwrap().verifying_key().to_bytes()),
+                            sig_hex: hex(&sig.to_bytes()),
+                            receipt_hex: hex(&receipt_bytes),
+                        },
+                    )
+                    .map_err(|e| format!("receipt submit: {e}"))?;
+                    println!(
+                        "[{}] submitted zk receipt claim for {} ({} bytes)",
+                        cfg.worker_id,
+                        descriptor.job_id,
+                        receipt_bytes.len()
+                    );
+                    submitted = true;
+                    continue;
                 }
 
                 // Materialize from the local (hash-verified) store.

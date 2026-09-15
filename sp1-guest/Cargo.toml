@@ -9,6 +9,7 @@ edition = "2021"
 # Keep this version in sync with the installed SP1 toolchain
 # (`~/.sp1/bin/cargo-prove prove --version`).
 sp1-zkvm = "6.8.0"
+blake3 = { version = "1", default-features = false }
 serde_json = "1"
 jobfmt = { path = "../crates/jobfmt" }
 rvcore = { path = "../crates/rvcore" }

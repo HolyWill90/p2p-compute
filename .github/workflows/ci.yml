@@ -148,9 +148,17 @@ jobs:
         run: |
           (cd jobs/demo-hash/job && cargo build --release)
           cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash-nano/program.elf
+      - name: Build the zk verifier binary
+        working-directory: sp1-host
+        run: cargo build --release --bins
       - name: Verify the committed nano receipt
         working-directory: sp1-host
         run: cargo run --release --bin emu -- verify ../jobs/demo-hash-nano ../sp1-artifacts/nano-receipt.bin ../sp1-artifacts/sp1-guest-emu.elf
+      - name: End-to-end receipt claim over the wire
+        env:
+          P2PC_ZK_VERIFY: ${{ github.workspace }}/sp1-host/target/release/zk-verify
+          P2PC_ZK_GUEST_ELF: ${{ github.workspace }}/sp1-artifacts/sp1-guest-emu.elf
+        run: cargo test -p coordinator --test network zk_receipt_claim_accepts_job -- --nocapture
 
   coverage:
     # Line-coverage floor over the verification-critical crates, so

@@ -14,7 +14,7 @@ Every verification mechanism consumes that chunk-hash chain:
 |---|---|---|---|
 | Budget | Quorum N=3 → 5, bond slashing | ~3× | implemented |
 | Standard | Optimistic acceptance + dispute game (one-chunk judge) | ~1× | implemented |
-| Strong | SP1 zkVM proof **of the emulator itself executing the actual job ELF** | 1× + prover tax | **receipt verified** (nano envelope, ~16K instructions; multi-shard proving is an open infra gap) |
+| Strong | SP1 zkVM proof **of the emulator itself executing the actual job ELF** | 1× + prover tax | **receipt verified AND accepted by the network** (nano envelope; multi-shard proving is an open infra gap) |
 
 See `docs/DESIGN.md` for the decision log and `docs/PILOT.md` for the
 product direction.
@@ -100,7 +100,13 @@ target/release/coordinator.exe fetch --desc target/demo.desc.json --store target
 target/release/worker.exe run target/materialized --id from-store   # identical result hash
 target/release/coordinator.exe verify --store target/store
 
-# 16. network session: TLS + authenticated identities + admission PoW;
+# 16. zk tier over the wire: a worker carrying a verified SP1 receipt
+#     is accepted on the proof alone — no quorum needed. Serve with the
+#     verifier binary + committed guest ELF; run the worker with --receipt-file
+target/release/coordinator.exe serve --jobs-dir target/jobs --store target/store --tls --identity-pow-bits 20 --zk-verify-bin sp1-host/target/release/zk-verify --zk-guest-elf sp1-artifacts/sp1-guest-emu.elf --max-jobs 1
+target/release/worker.exe daemon --server 127.0.0.1:7777 --id prover --identity prover.key --receipt-file sp1-artifacts/nano-receipt.bin
+
+# 17. network session: TLS + authenticated identities + admission PoW;
 #     serve --tls generates a self-signed coordinator cert on first run;
 #     workers pin its fingerprint (--server-cert) — no other server is accepted
 target/release/coordinator.exe serve --jobs-dir target/jobs --store target/store --tls --identity-pow-bits 20 --max-jobs 1
@@ -132,10 +138,14 @@ demonstrates:
 - **Independent correctness evidence**: the official riscv-tests
   suites (67/67) and a QEMU differential — sampled evidence that the
   platform matches the ISA, not a proof.
-- **A verified same-ELF zk receipt**: a cryptographic proof that the
-  pinned emulator, compiled inside the zkVM, executed the real job ELF
-  and produced the exact chunk chain the local run produced (nano
-  envelope). This is the tier that removes trust in workers entirely.
+- **A verified same-ELF zk receipt, accepted over the wire**: a
+  cryptographic proof that the pinned emulator, compiled inside the
+  zkVM, executed the real job ELF (bound to its content hashes) and
+  produced the exact chunk chain the local run produced. The
+  coordinator verifies the receipt via an external oracle and accepts
+  the job on the proof alone — the tier that removes trust in workers
+  entirely (nano envelope; CI re-verifies the committed receipt every
+  run).
 
 What remains open (full list in `docs/DESIGN.md`): bonds are ledger
 bookkeeping rather than escrowed stake; identity cost is

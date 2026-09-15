@@ -92,7 +92,15 @@ Build the substrate first; the tiers plug into it.
   ("artifact not found") in both compressed and core modes): receipts
   beyond one shard need a newer SP1 or the GPU prover — the already-
   listed operationalization gap. Wiring a verified receipt into the
-  coordinator as an accepted verification tier is the next step.
+  coordinator as an accepted verification tier is DONE (2026-09-15):
+  the guest commits a job binding - BLAKE3 of (manifest, elf, input),
+  i.e. the descriptor's content ids - and authenticated workers submit
+  a signed ReceiptClaim over the wire; the coordinator verifies it via
+  an external verifier binary (sp1-host's zk-verify, keeping the
+  coordinator SDK-free) and accepts the job on the proof alone
+  (Decision::Accept { zk: true } - no quorum threshold applies).
+  Demonstrated by the zk_receipt_claim_accepts_job network test and
+  re-verified in CI against the committed receipt on every run.
 - **Identity cost — admission proof-of-work**: keypairs are free, so
   "slashing" could not bite: a banned identity returned with a fresh
   key. Authentication now requires mining
