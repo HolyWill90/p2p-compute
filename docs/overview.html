@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>p2p-compute — project state briefing</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2129; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --green: #3fb950;
+    --red: #f85149; --amber: #d29922; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 32px 80px; }
+  h1 { font-size: 2.1em; margin: 40px 0 4px; letter-spacing: -0.02em; }
+  h1 .sub { display: block; font-size: 0.45em; color: var(--dim); font-weight: 400; letter-spacing: 0.02em; margin-top: 6px; }
+  h2 { font-size: 1.35em; margin-top: 48px; padding-bottom: 8px; border-bottom: 1px solid var(--border); color: var(--accent); }
+  h3 { font-size: 1.05em; margin-top: 28px; color: var(--purple); }
+  p { margin: 12px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  code, .mono { font-family: "Cascadia Code", Consolas, Menlo, monospace; font-size: 0.92em; }
+  code { background: var(--panel2); padding: 2px 6px; border-radius: 4px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin: 20px 0; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; }
+  .card .k { color: var(--dim); font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.08em; }
+  .card .v { font-size: 1.35em; font-weight: 600; margin-top: 4px; }
+  .card .n { color: var(--dim); font-size: 0.85em; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.95em; }
+  th { text-align: left; color: var(--dim); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.06em; }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:hover td { background: var(--panel2); }
+  .pill { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 0.8em; font-weight: 600; }
+  .pill.g { background: rgba(63,185,80,.15); color: var(--green); }
+  .pill.a { background: rgba(210,153,34,.15); color: var(--amber); }
+  .pill.r { background: rgba(248,81,73,.15); color: var(--red); }
+  .pill.b { background: rgba(88,166,255,.15); color: var(--accent); }
+  .pill.p { background: rgba(188,140,255,.15); color: var(--purple); }
+  .box { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 14px 18px; margin: 16px 0; }
+  .box.warn { border-left-color: var(--amber); }
+  .box.good { border-left-color: var(--green); }
+  .box.bad { border-left-color: var(--red); }
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 18px 0; }
+  .flow .step { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; flex: 1 1 130px; min-width: 130px; }
+  .flow .step .t { font-weight: 600; color: var(--accent); font-size: 0.9em; }
+  .flow .step .d { color: var(--dim); font-size: 0.82em; margin-top: 4px; }
+  .flow .arrow { align-self: center; color: var(--dim); font-size: 1.2em; }
+  ul { margin: 10px 0; padding-left: 24px; }
+  li { margin: 6px 0; }
+  li::marker { color: var(--accent); }
+  .dim { color: var(--dim); }
+  .mono-block { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; font-family: Consolas, Menlo, monospace; font-size: 0.88em; overflow-x: auto; white-space: pre; margin: 14px 0; color: #c9d1d9; }
+  .ledger { font-family: Consolas, monospace; }
+  .ledger .plus { color: var(--green); } .ledger .minus { color: var(--red); }
+  footer { margin-top: 70px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--dim); font-size: 0.85em; }
+  .toc { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 20px 0; font-size: 0.9em; }
+  .toc a { background: var(--panel); border: 1px solid var(--border); padding: 3px 12px; border-radius: 999px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>p2p-compute
+  <span class="sub">Deterministic verification substrate for peer-to-peer compute — project state briefing</span>
+</h1>
+
+<p>Jobs (RISC-V programs + inputs) run on <strong>untrusted machines</strong>. Every machine executes the
+same pinned deterministic emulator and emits a hash chain covering the entire execution. Because the
+execution is byte-for-byte deterministic, a single compared hash is enough to detect any fraud — and the
+system offers three independent ways to do that comparing, up to and including a zero-knowledge proof of
+the emulator itself.</p>
+
+<div class="toc">
+  <a href="#numbers">By the numbers</a><a href="#artifact">The core artifact</a><a href="#tiers">Verification tiers</a>
+  <a href="#network">Network layer</a><a href="#demos">Live demonstrations</a><a href="#security">Security ledger</a>
+  <a href="#ci">Quality gates</a><a href="#limits">Honest limits</a><a href="#roadmap">Roadmap</a><a href="#repo">Repository</a>
+</div>
+
+<h2 id="numbers">By the numbers</h2>
+<div class="grid">
+  <div class="card"><div class="k">Official conformance</div><div class="v">67 / 67</div><div class="n">riscv-tests rv64ui/um/uc suites, all CI platforms</div></div>
+  <div class="card"><div class="k">Interpreter throughput</div><div class="v">~84M inst/s</div><div class="n">reported (single-host measurement, not CI-verified); 4.5× over the original design</div></div>
+  <div class="card"><div class="k">CI quality gates</div><div class="v">9 / 9</div><div class="n">all required on protected main</div></div>
+  <div class="card"><div class="k">Review rounds survived</div><div class="v">5</div><div class="n">every finding fixed with a regression test or documented as a limit</div></div>
+  <div class="card"><div class="k">Fuzz executions (CI)</div><div class="v">~14M</div><div class="n">per run, three ASAN targets; 34M+ reported in a single local session</div></div>
+  <div class="card"><div class="k">Test harnesses</div><div class="v">77</div><div class="n">tests across 27 harnesses: ISA, quorum, network, collusion, snapshot, mem</div></div>
+  <div class="card"><div class="k">Physical fleet</div><div class="v">3</div><div class="n">reported (live demo); coordinator + 2 workers, plus a WAN peer via phone hotspot</div></div>
+</div>
+
+<h2 id="artifact">The core artifact: a pinned deterministic emulator</h2>
+<p>The foundation is <code>crates/rvcore</code> — an interpreter for a deliberately small slice of RISC-V
+(<strong>RV64IMC</strong>: integer, multiplication, compressed instructions; no atomics, no floating point).
+Smallness is the point: the entire architectural state is enumerable, so "deterministic" is enforced by
+construction, not by discipline.</p>
+
+<h3>The determinism contract</h3>
+<ul>
+  <li>Architectural state = <strong>32 registers + pc + mtvec + mepc + mcause + mstatus + memory</strong> — nothing hidden, no flags, no clock, no ambient RNG.</li>
+  <li>Unallocated pages read as zero; writes allocate; flat 4 GiB space; misaligned loads/stores supported (deterministic byte-level split, matching spike/QEMU).</li>
+  <li>Invalid encodings and out-of-range accesses trap; <code>ecall</code> traps (QEMU-compatible syscall mode for the differential); <code>ebreak</code> halts; <code>mret</code> returns to <code>mepc</code>.</li>
+  <li>Every field above is hashed — a forged snapshot cannot carry hidden state past the chain check.</li>
+</ul>
+
+<h3>The chunk-hash chain</h3>
+<div class="mono-block">h_i = BLAKE3( h_{i-1} ‖ x0..x31 ‖ pc ‖ mtvec ‖ mepc ‖ mcause ‖ mstatus ‖ memory_root )</div>
+<p>Emitted every <code>chunk_size</code> instructions and at exit. <code>memory_root</code> is a
+<strong>canonical memory digest</strong> — one flat BLAKE3 digest over the sorted page indices and their
+full 4 KiB contents (not a Merkle tree). The chain is the single artifact every verification tier consumes.</p>
+
+<h3>How correctness is evidenced</h3>
+<table>
+  <tr><th>Evidence</th><th>What it shows</th><th>Status</th></tr>
+  <tr><td>Official riscv-tests (rv64ui/um/uc)</td><td>Standard-suite ISA conformance, 67 binaries executed by the emulator</td><td><span class="pill g">67/67, all CI platforms</span></td></tr>
+  <tr><td>QEMU differential</td><td>Same ELF under qemu-riscv64 (independent implementation) → byte-identical output</td><td><span class="pill g">pass</span></td></tr>
+  <tr><td>Cross-platform determinism</td><td>Linux / Windows / macOS (x64 + ARM64), debug + release → identical chunk chains</td><td><span class="pill g">pass</span></td></tr>
+  <tr><td>Fuzzing</td><td>ELF parser, result encoders, wire decoder under ASAN (34M+ runs; 3 crashes found and fixed)</td><td><span class="pill g">clean, in CI</span></td></tr>
+</table>
+<p class="dim">Honest framing: this is <em>sampled</em> independent evidence, not a proof. The zk tier is what removes the sampling.</p>
+
+<h2 id="tiers">Three verification tiers, one hash chain</h2>
+<p class="dim">Not "interchangeable" in the strict sense: quorum and zk receipt acceptance are live in the
+network server; optimistic acceptance and the dispute game are implemented at CLI/library level and not yet
+wired into the network flow.</p>
+<table>
+  <tr><th>Tier</th><th>Mechanism</th><th>Trust removed</th><th>Cost</th><th>Status</th></tr>
+  <tr><td><span class="pill b">Budget</span></td><td>Quorum: random workers (Fisher–Yates over OS CSPRNG; pool size is configuration — default dispatches all authenticated workers), escalation reserves, bond slashing; threshold anchored to the <em>dispatched</em> pool; one vote per worker</td><td>Workers agreeing on a fake result — under independent sampling the compromise probability is the binomial majority tail P(X ≥ ⌊N/2⌋+1) for cheating fraction f; finite pools sample without replacement (hypergeometric)</td><td>~N× executions</td><td><span class="pill g">live, network-hardened</span></td></tr>
+  <tr><td><span class="pill p">Standard</span></td><td>Optimistic acceptance + dispute game (one-chunk judge, per-chunk snapshots)</td><td>Same, at 1× cost unless challenged</td><td>~1×</td><td><span class="pill a">implemented (CLI/library; not yet network-wired)</span></td></tr>
+  <tr><td><span class="pill a">Strong</span></td><td>SP1 zkVM proof <strong>of the emulator itself executing the actual job ELF</strong>, bound to the job's content hashes, verified by an external oracle</td><td>Everything: one cryptographic proof replaces worker consensus</td><td>1× + prover tax</td><td><span class="pill a">receipt verified + wired into the network (nano envelope)</span></td></tr>
+</table>
+
+<h3>How the zk tier works (same-ELF, not same-algorithm)</h3>
+<div class="flow">
+  <div class="step"><div class="t">Guest = the emulator</div><div class="d">rvcore itself, compiled into the SP1 zkVM — not a reimplementation</div></div>
+  <div class="arrow">→</div>
+  <div class="step"><div class="t">Job binding</div><div class="d">commits BLAKE3(manifest, elf, input) = the descriptor's content ids, before executing</div></div>
+  <div class="arrow">→</div>
+  <div class="step"><div class="t">Journal</div><div class="d">status, instruction count, full chunk chain, output</div></div>
+  <div class="arrow">→</div>
+  <div class="step"><div class="t">Verified receipt</div><div class="d">coordinator's external oracle re-derives the key from the committed guest ELF and checks the binding</div></div>
+  <div class="arrow">→</div>
+  <div class="step"><div class="t">Accept</div><div class="d">Decision::Accept { zk: true } — no quorum threshold applies</div></div>
+</div>
+<p class="dim">CI re-verifies the committed receipt on every run (the <code>zk-receipt</code> job). The sealed artifact set — receipt + guest ELF + job bytes — travels together.</p>
+
+<h2 id="network">The network layer</h2>
+<ul>
+  <li><strong>Identity</strong>: Ed25519 keypairs, nonce challenge-response at hello; results signed over their <em>entire</em> content (job id, status, instruction count, full chain, output) via an explicit length-prefixed encoding.</li>
+  <li><strong>Admission proof-of-work</strong>: <code>BLAKE3(nonce ‖ counter)</code> to <code>--identity-pow-bits</code> leading zeros, nonce fresh per connection — a banned identity pays to return. This is what makes slashing/bans bite even though keypairs are free.</li>
+  <li><strong>Transport</strong>: length-prefixed JSON frames over TCP, TLS 1.3 (rustls) with coordinator certificate + BLAKE3 fingerprint pinning — no CA, no other server accepted.</li>
+  <li><strong>Quorum integrity</strong>: results only from dispatched workers; one vote per worker; threshold = strict majority of the dispatched pool (a timeout cannot shrink it); rejected jobs return bonds untouched (slashing requires proof).</li>
+  <li><strong>Content store</strong>: BLAKE3-addressed blobs (the "torrent" layer) — descriptor = the torrent file; workers fetch from peers first, coordinator as fallback, every byte hash-verified on arrival.</li>
+</ul>
+
+<h2 id="demos">What has been demonstrated live</h2>
+<p class="dim">The demonstrations below were run and observed on real machines; they are reported here from
+session logs and are not reproduced by CI (CI verifies the protocol logic, determinism and receipts
+independently). Fuzz-execution counts: ~14M per CI run is independently verifiable from the workflow logs.</p>
+
+<h3>Three physical machines, one quorum, one liar</h3>
+<div class="mono-block">coordinator        (this machine, TLS + 8-bit PoW)
+  ├─ wA  local        → honest      result accepted
+  ├─ wB  machine 2    → honest      result accepted
+  └─ wC  machine 3    → FABRICATED  hash excluded from the winning group
+
+decision: Accept { hash: 67925f93…, agreed: ["wA","wB"] }
+ledger:   wA +10   wB +10   wC −100   (bond burned)</div>
+
+<h3>A worker joining from the open internet</h3>
+<p>Machine 3 moved to a <strong>phone hotspot</strong> (a genuinely foreign network), the coordinator exposed
+through a router port-forward at the real public IP (after discovering an active ProtonVPN was masking it —
+the first connection attempt dialed the VPN exit node). The WAN peer mined the 22-bit admission proof over
+the internet, fetched and hash-verified the job blobs across the WAN, executed 16,410 instructions, and
+produced the exact pinned hash. Accepted and rewarded.</p>
+<div class="mono-block">decision: Accept { hash: 00d58a79…, agreed: ["wan-worker"], zk: false }
+ledger:   wan-worker +10</div>
+
+<h3>The zk receipt, end to end</h3>
+<p>A receipt-carrying worker submitted a signed SP1 receipt for the nano job; the coordinator verified it
+through the external oracle (key re-derived from the committed guest ELF, binding checked against the
+descriptor's content ids) and <strong>accepted the job on the proof alone</strong> —
+<code>Decision::Accept { zk: true }</code>, zero execution results, no quorum.</p>
+
+<h3>Performance</h3>
+<div class="mono-block">demo-hash job (33,554,458 instructions, 2 MiB input, release build, end-to-end):
+  BTreeMap memory       1.79 s   (~22M inst/s)
+  lookaside memory      0.40 s   (~84M inst/s)   ← current, 4.5×
+  (a flat page index hit 0.29 s / 5× but crossed an SP1 shard
+   boundary — provability was worth the tradeback; documented)</div>
+
+<h2 id="security">The security ledger — five review rounds</h2>
+<p>An external auditor reviewed the project repeatedly. Every finding across five rounds is closed with a
+regression test (or documented as an architectural limit). Selected entries:</p>
+<table>
+  <tr><th>Round</th><th>Severity</th><th>Finding</th><th>Resolution</th></tr>
+  <tr><td>1</td><td>Critical ×3</td><td>Quorum vote stuffing; signatures covering only the result hash; forged snapshots via unhashed CSRs</td><td>Vote gates + full-result signatures + CSRs hashed into the chain</td></tr>
+  <tr><td>1</td><td>Critical / High</td><td>Arbitrary file writes via manifest paths; overflow arithmetic; pre-auth panic</td><td>Path confinement; checked arithmetic everywhere; panic-free wire decoding</td></tr>
+  <tr><td>2</td><td>High</td><td>Verifier process boundary unbounded</td><td>64 MB receipt cap before decode; 180 s wall-clock kill; one attempt per worker; exclusive temp files</td></tr>
+  <tr><td>fuzzing</td><td>High ×3</td><td>ELF loader arithmetic overflows; giant-BSS allocation OOM</td><td>Checked math + allocation bounds; synthetic regression tests; 34M+ clean runs</td></tr>
+  <tr><td>5</td><td>Test quality</td><td>Gate regression test exercised a recreated closure, not the production gate</td><td>Gate extracted into <code>receipt_claim_gate</code>; the test now runs the real function</td></tr>
+</table>
+<p class="dim">Final external rating: 8/10 — "security-conscious prototype." The rating and its conditions are kept visible on purpose.</p>
+
+<h2 id="ci">Quality gates (required on protected main)</h2>
+<table>
+  <tr><th>Check</th><th>What it enforces</th></tr>
+  <tr><td>test (ubuntu / windows / macos)</td><td>27 harnesses × 3 OSes, x64 + ARM64</td></tr>
+  <tr><td>conformance</td><td>QEMU differential + 67/67 riscv-tests (release build)</td></tr>
+  <tr><td>cross-verify</td><td>All three platforms' chunk chains byte-identical, per job</td></tr>
+  <tr><td>fuzz</td><td>ASAN fuzzing of ELF parse / encoders / wire decode, pinned nightly + cargo-fuzz</td></tr>
+  <tr><td>audit</td><td>RustSec advisories against Cargo.lock (caught rustls RUSTSEC-2026-0285 live)</td></tr>
+  <tr><td>zk-receipt</td><td>Committed SP1 receipt re-verified + end-to-end receipt-claim network test</td></tr>
+  <tr><td>coverage</td><td>61% measured, 55% floor; job ELFs built so integration tests actually run</td></tr>
+</table>
+<p class="dim">Tooling pinned: rustc 1.98.1, nightly-2026-08-15 (fuzz), cargo-fuzz 0.13.2, cargo-audit 0.22.2. Direct pushes to main are declined; everything goes through PRs with the checks.</p>
+
+<h2 id="limits">Honest limits — what this is NOT</h2>
+<div class="box warn">
+  <ul style="margin:4px 0">
+    <li><strong>Bonds are bookkeeping, not escrow.</strong> Slashing edits a JSON ledger; identity cost is proof-of-work, not capital. A determined attacker's cost is compute, not money.</li>
+    <li><strong>The coordinator is trusted</strong> for worker selection and ledger keeping. This is verifiable compute for the job client, not trustless compute between strangers.</li>
+    <li><strong>Agreement is not truth.</strong> Quorum and disputes verify that copies of <em>our emulator</em> agree; ISA correctness rests on sampled independent evidence (QEMU, official suite). The zk tier collapses the anchor to the emulator source + zkVM soundness — at the nano envelope today.</li>
+    <li><strong>Multi-shard receipts are blocked on SP1 6.8</strong> ("artifact not found" on CPU; shard-boundary crashes on execute). Bigger proofs need newer SP1, a GPU, or a prover market.</li>
+    <li><strong>NAT traversal is router/overlay-assisted</strong> (port-forward worked in the demo). Native hole-punching/relay is unbuilt.</li>
+  </ul>
+</div>
+
+<h2 id="roadmap">Roadmap</h2>
+<table>
+  <tr><th>Item</th><th>Why</th><th>Needs</th></tr>
+  <tr><td>Prover scale-out (smoke + multi-shard receipts)</td><td>Grows the zk tier's envelope beyond ~16K instructions</td><td>GPU box, prover network key, or newer SP1</td></tr>
+  <tr><td>Remote bisection dispute game over the wire</td><td>Full two-party arbitration without exchanging full chains</td><td>Nothing — code work</td></tr>
+  <tr><td>Measurement campaign + arXiv preprint</td><td>"One chain, three tiers" is an unclaimed composition</td><td>Nothing — time; GPU helps the numbers</td></tr>
+  <tr><td>NAT traversal + peer discovery</td><td>The "torrent" vision beyond port-forwards</td><td>An outside-the-LAN machine to prove against</td></tr>
+  <tr><td>Decoded-instruction cache</td><td>Further throughput beyond the page-table win</td><td>Nothing — code work</td></tr>
+</table>
+
+<h2 id="repo">Repository</h2>
+<div class="mono-block">crates/abi           job ABI: memory map, halt convention, pinned ISA
+crates/rvcore        the emulator + chunk-hash chain (this is the trust anchor)
+crates/jobfmt        manifests, result formats, signing-message encoding
+crates/worker        worker daemon + local runner        (a "peer")
+crates/coordinator   quorum / dispute / ledger / network server (the job client)
+crates/wire          frames, TLS, admission PoW          (the transport)
+crates/contentstore  BLAKE3-addressed blob store         (the "torrent" layer)
+crates/difftest      debug-vs-release determinism harness
+crates/conformance   QEMU differential + riscv-tests tally
+arch-tests/          67 official riscv-tests ELFs
+jobs/                demo-hash, -smoke, -nano, conformance, agent-task
+sp1-guest/           zkVM guests: the algorithm (fnv) + the emulator (emu)
+sp1-host/            prover + zk-verify oracle + receipt artifacts
+scripts/             packaging and validation pipelines
+docs/DESIGN.md       decision log — every choice, every fix, every limit
+docs/PILOT.md        product direction: verifiable agent-task execution</div>
+
+<div class="box good">
+  <strong>The one-sentence status:</strong> verifiable untrusted computation over a real multi-machine
+  network is <em>running code</em>, not a hypothesis — fraud is detectable and punished, correctness is
+  independently sampled, and one cryptographic receipt can replace consensus entirely at the demonstrated
+  envelope. What remains between here and production is scale, incentives, and hostile-internet hardening —
+  all of them labeled, none of them hidden.
+</div>
+
+<footer>
+  p2p-compute · main @ 7552b01 · v0.1.0 · dual-licensed MIT / Apache-2.0 ·
+  docs: <code>docs/DESIGN.md</code> (decision log) · <code>docs/PILOT.md</code> (product) ·
+  <code>SECURITY.md</code> (reporting) · generated 2026-09-15
+</footer>
+
+</div>
+</body>
+</html>
