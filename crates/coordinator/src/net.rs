@@ -818,6 +818,20 @@ fn shutdown_all(conns: &Mutex<HashMap<usize, Conn>>, reason: &str) {
     }
 }
 
+/// The zk receipt-claim admission gate: exactly one claim attempt per
+/// dispatched worker per job. Returns false (and consumes nothing but
+/// the record of the attempt) when the worker has already claimed —
+/// a rejected or slow claim cannot be replayed to re-stall the
+/// verifier. Lives as a function so the regression test exercises the
+/// same code the network path runs.
+fn receipt_claim_gate(claimed: &mut Vec<String>, worker_id: &str) -> bool {
+    if claimed.iter().any(|id| id == worker_id) {
+        return false;
+    }
+    claimed.push(worker_id.to_string());
+    true
+}
+
 /// Validate and (via the external verifier) check a zk receipt claim,
 /// then mark the pending job as accepted on the proof alone.
 fn handle_receipt_claim(
@@ -868,11 +882,10 @@ fn handle_receipt_claim(
     // One receipt-claim attempt per dispatched worker: the attempt is
     // consumed whether the verification succeeds or fails, so a
     // rejected claim cannot be replayed to re-stall the verifier.
-    if job.receipt_claimed.iter().any(|id| id == worker_id) {
+    if !receipt_claim_gate(&mut job.receipt_claimed, worker_id) {
         eprintln!("SECURITY: repeat receipt claim from {worker_id} dropped");
         return;
     }
-    job.receipt_claimed.push(worker_id.to_string());
     let decode32 = |h: &str| -> Result<[u8; 32], String> {
         jobfmt::from_hex(h, 32)
             .map_err(|e| format!("descriptor hash: {e}"))?
@@ -1060,5 +1073,20 @@ fn session_loop(
                 break;
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod receipt_gate_tests {
+    use super::receipt_claim_gate;
+
+    #[test]
+    fn one_attempt_per_worker_then_dropped() {
+        let mut claimed: Vec<String> = Vec::new();
+        assert!(receipt_claim_gate(&mut claimed, "wC"));
+        assert!(!receipt_claim_gate(&mut claimed, "wC"), "repeat must be dropped");
+        assert!(receipt_claim_gate(&mut claimed, "wD"), "a different worker still claims");
+        assert_eq!(claimed, vec!["wC".to_string(), "wD".to_string()]);
     }
 }
