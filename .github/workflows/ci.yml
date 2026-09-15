@@ -100,8 +100,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
         uses: dtolnay/rust-toolchain@1.98.1
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+      - name: Install cargo-audit (pinned version)
+        run: cargo install cargo-audit --locked --version 0.22.2
       - name: Audit dependencies
         run: cargo audit
         # Informational warnings do not fail; known vulnerabilities do.
@@ -112,12 +112,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly
+      # Pinned nightly date: floating nightly changes sanitizer
+      # codegen independently of the repository.
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly-2026-08-15
         with:
           components: rust-src
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+      - name: Install cargo-fuzz (pinned version)
+        run: cargo install cargo-fuzz --locked --version 0.13.2
       - name: Fuzz the ELF parser
         run: cargo +nightly fuzz run fuzz_elf_parse -- -max_total_time=120 -rss_limit_mb=2560
       - name: Fuzz the job-format encoders
@@ -174,9 +176,21 @@ jobs:
         with:
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
-      - name: Coverage floor (rvcore + coordinator + wire)
-        run: cargo llvm-cov --workspace --fail-under-lines 25
+        run: cargo install cargo-llvm-cov --locked --version 0.4.7
+      - name: Build job ELFs (the network tests skip without them, which
+              would gut coverage)
+        run: |
+          (cd jobs/demo-hash/job && cargo build --release)
+          cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash/program.elf
+          (cd jobs/agent-task/job && cargo build --release)
+          cp jobs/agent-task/job/target/riscv64imac-unknown-none-elf/release/agent-task jobs/agent-task/program.elf
+          cp jobs/demo-hash/program.elf jobs/demo-hash-smoke/program.elf
+          cp jobs/demo-hash/program.elf jobs/demo-hash-nano/program.elf
+      - name: Coverage floor — workspace
+        # 61% measured with the integration tests running; per-crate
+        # floors would gate on package-isolated runs that lose the
+        # coordinator integration tests' coverage and are meaningless.
+        run: cargo llvm-cov --workspace --fail-under-lines 55
 
   cross-verify:
     needs: test

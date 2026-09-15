@@ -11,8 +11,10 @@
 //! worker consensus: no quorum threshold applies.
 
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct ReceiptOutcome {
@@ -20,6 +22,46 @@ pub struct ReceiptOutcome {
     pub instructions: u64,
     pub chunk_hashes: Vec<String>,
     pub output_hex: String,
+}
+
+/// A receipt claim larger than this is dropped before any work: the
+/// honest nano receipt is ~2.8 MB, and the verifier must never be
+/// handed an unbounded blob (a stalled or pathological verification
+/// run would otherwise freeze coordinator progress).
+pub const MAX_RECEIPT_BYTES: usize = 64 * 1024 * 1024;
+/// Hard wall-clock limit for one verifier invocation. The honest nano
+/// verification takes ~1 s; anything far beyond that is killed and
+/// rejected so the main loop cannot be wedged by a hostile claim.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A unique, exclusively-created receipt file: the shared predictable
+/// path this used to be was a race and symlink-replacement hazard
+/// between concurrent claims (found by external review).
+fn exclusive_receipt_file(bytes: &[u8]) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("p2pc-zk-verify");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("zk verify dir: {e}"))?;
+    for _ in 0..32 {
+        let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            dir.join(format!("receipt-{}-{n}.bin", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                use std::io::Write;
+                f.write_all(bytes)
+                    .map_err(|e| format!("receipt write: {e}"))?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("receipt create: {e}")),
+        }
+    }
+    Err("could not create a unique receipt temp file".into())
 }
 
 #[derive(Deserialize)]
@@ -46,26 +88,66 @@ pub fn verify_receipt(
     expected_binding: &[[u8; 32]; 3],
     guest_elf: &Path,
 ) -> Result<ReceiptOutcome, String> {
-    let dir = std::env::temp_dir().join("p2pc-zk-verify");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("zk verify dir: {e}"))?;
-    let receipt_path = dir.join("receipt.bin");
-    std::fs::write(&receipt_path, receipt_bytes).map_err(|e| format!("receipt write: {e}"))?;
+    if receipt_bytes.len() > MAX_RECEIPT_BYTES {
+        return Err(format!(
+            "receipt claim {} bytes exceeds the {} byte limit",
+            receipt_bytes.len(),
+            MAX_RECEIPT_BYTES
+        ));
+    }
+    let receipt_path = exclusive_receipt_file(receipt_bytes)?;
 
     let binding_hex: Vec<String> =
         expected_binding.iter().map(|h| hex_upper(h)).collect();
-    let output = Command::new(cmd)
+    let mut child = Command::new(cmd)
         .arg(guest_elf)
         .arg(&receipt_path)
         .args(&binding_hex)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("zk verifier spawn ({cmd}): {e}"))?;
+
+    // Hard wall-clock bound: a verifier that stalls (or a claim
+    // engineered to be pathologically expensive) is killed after
+    // VERIFY_TIMEOUT and the claim is rejected. The main loop stalls
+    // for at most this long per bogus claim — bounded, not unbounded.
+    let deadline = Instant::now() + VERIFY_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("zk verifier wait: {e}"));
+            }
+        }
+    };
+    let mut stdout_bytes = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        use std::io::Read;
+        let _ = out.read_to_end(&mut stdout_bytes);
+    }
     let _ = std::fs::remove_file(&receipt_path);
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let Some(status) = status else {
+        return Err(format!(
+            "zk verifier exceeded the {:?} time limit — claim rejected",
+            VERIFY_TIMEOUT
+        ));
+    };
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stdout_bytes);
         return Err(format!("zk verifier failed: {}", stderr.trim()));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
     let verdict: Verdict = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("zk verifier output: {e}"))?;
     if !verdict.ok {
@@ -83,4 +165,49 @@ pub fn verify_receipt(
 
 fn hex_upper(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_receipt_rejected_before_spawn() {
+        let big = vec![0u8; MAX_RECEIPT_BYTES + 1];
+        let binding = [[0u8; 32]; 3];
+        let err = verify_receipt("definitely-not-a-real-binary", &big, &binding, Path::new("g"))
+            .unwrap_err();
+        assert!(err.contains("exceeds"), "got: {err}");
+    }
+
+    #[test]
+    fn missing_verifier_is_a_clean_error() {
+        let binding = [[0u8; 32]; 3];
+        let err = verify_receipt(
+            "definitely-not-a-real-binary-42",
+            &[1, 2, 3],
+            &binding,
+            Path::new("guest"),
+        )
+        .unwrap_err();
+        assert!(err.contains("spawn"), "got: {err}");
+    }
+
+    #[test]
+    fn receipt_temp_files_are_unique_and_exclusive() {
+        let a = exclusive_receipt_file(b"one").unwrap();
+        let b = exclusive_receipt_file(b"two").unwrap();
+        assert_ne!(a, b, "concurrent claims must not share a temp path");
+        assert_eq!(std::fs::read(&a).unwrap(), b"one");
+        assert_eq!(std::fs::read(&b).unwrap(), b"two");
+        // Re-creating the same name must fail (exclusive create) — the
+        // guarantee that defeats symlink/replacement races.
+        assert!(std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&a)
+            .is_err());
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
 }
