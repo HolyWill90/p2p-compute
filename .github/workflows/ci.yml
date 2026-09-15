@@ -151,6 +151,10 @@ jobs:
       - name: Build the zk verifier binary
         working-directory: sp1-host
         run: cargo build --release --bins
+      - name: Debug binding inputs
+        run: |
+          sha256sum jobs/demo-hash-nano/job.json jobs/demo-hash-nano/program.elf jobs/demo-hash-nano/input.bin
+          sha256sum sp1-artifacts/sp1-guest-emu.elf sp1-artifacts/nano-receipt.bin
       - name: Verify the committed nano receipt
         working-directory: sp1-host
         run: cargo run --release --bin emu -- verify ../jobs/demo-hash-nano ../sp1-artifacts/nano-receipt.bin ../sp1-artifacts/sp1-guest-emu.elf
