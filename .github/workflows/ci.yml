@@ -144,10 +144,9 @@ jobs:
           targets: riscv64imac-unknown-none-elf
       - name: Install protoc (sp1-prover-types build dependency)
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: Build the nano job ELF (RISC-V)
-        run: |
-          (cd jobs/demo-hash/job && cargo build --release)
-          cp jobs/demo-hash/job/target/riscv64imac-unknown-none-elf/release/demo-hash jobs/demo-hash-nano/program.elf
+      # The nano job ELF is a committed sealed artifact: the committed
+      # receipt is bound to its exact bytes, so it is NOT rebuilt here
+      # (the job ELF is not byte-deterministic across build hosts).
       - name: Build the zk verifier binary
         working-directory: sp1-host
         run: cargo build --release --bins
