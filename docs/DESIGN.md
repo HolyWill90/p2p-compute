@@ -72,6 +72,17 @@ Build the substrate first; the tiers plug into it.
     job's staged artifact, so cross-platform comparison only covered
     the one-chunk smoke run. difftest takes `--out-prefix` and both
     jobs are staged and compared per job across all platforms.
+- **zk verifier process boundary hardened (external review round 3)**:
+  receipt claims are size-capped before decode (64 MB), the verifier
+  runs under a 30 s wall-clock limit with kill-on-exceed (a stalled or
+  pathological verification can no longer wedge the coordinator loop),
+  and the receipt temp file is unique and exclusively created per
+  verification (the shared predictable path was a race and
+  symlink-replacement hazard between concurrent claims). CI
+  reproducibility pinned: nightly date, cargo-fuzz, cargo-audit
+  versions fixed; the coverage job now builds the job ELFs (the
+  network tests were skipping without them, gutting measured coverage)
+  and the floor is raised from 25% to 55% of measured 61%.
 - **zk tier, same-ELF — RECEIPT VERIFIED (2026-09-14)**: the earlier
   zk claim was same-ALGORITHM only (an SP1 guest reimplementing
   demo-hash's FNV streams). The guest is now the actual emulator:
