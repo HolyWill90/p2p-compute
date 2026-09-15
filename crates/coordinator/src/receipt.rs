@@ -102,14 +102,20 @@ pub fn verify_receipt(
 
     let binding_hex: Vec<String> =
         expected_binding.iter().map(|h| hex_upper(h)).collect();
-    let mut child = Command::new(cmd)
+    let mut child = match Command::new(cmd)
         .arg(guest_elf)
         .arg(&receipt_path)
         .args(&binding_hex)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("zk verifier spawn ({cmd}): {e}"))?;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&receipt_path);
+            return Err(format!("zk verifier spawn ({cmd}): {e}"));
+        }
+    };
 
     // Hard wall-clock bound: a verifier that stalls (or a claim
     // engineered to be pathologically expensive) is killed after
@@ -129,6 +135,7 @@ pub fn verify_receipt(
             }
             Err(e) => {
                 let _ = child.kill();
+                let _ = std::fs::remove_file(&receipt_path);
                 return Err(format!("zk verifier wait: {e}"));
             }
         }
@@ -147,8 +154,10 @@ pub fn verify_receipt(
         ));
     };
     if !status.success() {
-        let stderr = String::from_utf8_lossy(&stdout_bytes);
-        return Err(format!("zk verifier failed: {}", stderr.trim()));
+        // The verifier reports failures on stdout (the JSON verdict)
+        // when it runs but rejects; stderr carries process-level errors.
+        let out = String::from_utf8_lossy(&stdout_bytes);
+        return Err(format!("zk verifier failed: {}", out.trim()));
     }
     let stdout = String::from_utf8_lossy(&stdout_bytes);
     let verdict: Verdict = serde_json::from_str(stdout.trim())
@@ -212,5 +221,27 @@ mod tests {
             .is_err());
         let _ = std::fs::remove_file(a);
         let _ = std::fs::remove_file(b);
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    #[test]
+    fn repeat_attempts_consume_the_gate() {
+        // One receipt-claim attempt per dispatched worker: the second
+        // claim from the same worker is dropped before any verifier
+        // work, so a rejected claim cannot be replayed to re-stall.
+        let mut claimed: Vec<String> = Vec::new();
+        let worker = "wC".to_string();
+        let gate = |claimed: &mut Vec<String>, w: &str| -> bool {
+            if claimed.iter().any(|id| id == w) {
+                return false;
+            }
+            claimed.push(w.to_string());
+            true
+        };
+        assert!(gate(&mut claimed, &worker));
+        assert!(!gate(&mut claimed, &worker), "repeat must be dropped");
+        assert_eq!(claimed, vec!["wC".to_string()]);
     }
 }
