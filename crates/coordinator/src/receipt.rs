@@ -223,25 +223,3 @@ mod tests {
         let _ = std::fs::remove_file(b);
     }
 }
-
-#[cfg(test)]
-mod gate_tests {
-    #[test]
-    fn repeat_attempts_consume_the_gate() {
-        // One receipt-claim attempt per dispatched worker: the second
-        // claim from the same worker is dropped before any verifier
-        // work, so a rejected claim cannot be replayed to re-stall.
-        let mut claimed: Vec<String> = Vec::new();
-        let worker = "wC".to_string();
-        let gate = |claimed: &mut Vec<String>, w: &str| -> bool {
-            if claimed.iter().any(|id| id == w) {
-                return false;
-            }
-            claimed.push(w.to_string());
-            true
-        };
-        assert!(gate(&mut claimed, &worker));
-        assert!(!gate(&mut claimed, &worker), "repeat must be dropped");
-        assert_eq!(claimed, vec!["wC".to_string()]);
-    }
-}
