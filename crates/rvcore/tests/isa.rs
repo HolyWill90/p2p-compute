@@ -229,7 +229,7 @@ fn w_form_sign_extension() {
 
 #[test]
 fn loads_stores_roundtrip() {
-    let (cpu, mem) = exec(
+    let (cpu, mut mem) = exec(
         &[
             u_type(0x40000, 5, 0b0110111), // x5 = 0x4000_0000
             i_type(-2, 0, 0, 6, OPIMM),    // x6 = -2
