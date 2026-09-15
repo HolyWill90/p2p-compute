@@ -370,9 +370,18 @@ fn session_once(
     let mut submitted = false;
     loop {
         let received = wire::receive::<ServerToClient>(&mut stream);
-        if submitted && matches!(received, Err(wire::WireError::ConnectionClosed)) {
-            // The server closed right after taking our result — the
-            // decision was reached without a formal goodbye.
+        // A post-submit connection teardown (clean FIN or a RST — the
+        // latter is what NAT/middleboxes and abrupt server closes
+        // produce, e.g. across the internet) means the decision was
+        // reached without a formal goodbye.
+        let closed_cleanly =
+            matches!(&received, Err(wire::WireError::ConnectionClosed));
+        let reset_after_submit = matches!(
+            &received,
+            Err(wire::WireError::Io(e))
+                if submitted && e.kind() == std::io::ErrorKind::ConnectionReset
+        );
+        if closed_cleanly || reset_after_submit {
             println!("[{}] session over: decision reached", cfg.worker_id);
             return Ok((
                 SessionEnd::ServerShutdown,
