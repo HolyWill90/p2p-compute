@@ -3,12 +3,17 @@
 // out-of-line call in debug builds.
 #![allow(clippy::manual_is_multiple_of)]
 
+use std::collections::BTreeMap;
+
 pub const PAGE_SIZE: usize = 4096;
 /// The emulator pins a flat 4 GiB address space (32-bit effective).
 /// Any access computing an address at or above this bound is a trap.
 pub const ADDR_SPACE: u64 = 1 << 32;
-/// Total pages in the pinned space (2^32 / 4096).
-pub const PAGE_COUNT: usize = (ADDR_SPACE / PAGE_SIZE as u64) as usize;
+/// Direct-mapped lookaside size. Covers every hot page of our jobs
+/// (demo-hash touches ~520) with a single tagged probe.
+const LOOKASIDE_SLOTS: usize = 2048;
+const NO_SLOT: u32 = u32::MAX;
+const NO_PAGE: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemError {
@@ -16,18 +21,22 @@ pub enum MemError {
 }
 
 type Page = Box<[u8; PAGE_SIZE]>;
-const UNALLOCATED: u32 = u32::MAX;
 
 /// Sparse paged memory. Reads of unallocated pages return zero
 /// (canonical); writes allocate. Memory is part of the hashed state,
 /// so allocation order must never influence the hash: the Merkle root
 /// is computed over pages in sorted index order.
 ///
-/// Layout: `page_index` maps page number -> slot in `pages` (O(1)
-/// lookups on the per-instruction fetch/load/store paths, versus the
-/// O(log n) BTreeMap this used to be). `page_index` grows lazily to
-/// cover the highest allocated page; a 4 MiB fully-populated job pays
-/// ~2 KiB of index. Unallocated slots are UNALLOCATED sentinels.
+/// Layout: `page_dir` is the canonical sparse map (page -> slot, the
+/// sorted iteration order for hashing and snapshots); `page_slots`
+/// holds the pages (append-only — slots are stable for the life of
+/// the Mem). `lookaside` is a tagged direct-mapped cache over the
+/// directory so the per-instruction fetch/load/store path probes one
+/// array entry instead of walking the map. It deliberately replaces
+/// the flat page-index this used to be: a flat index spanning the
+/// ABI's address layout (stack at 0x83F0_0000 vs image at 0x8000_0000)
+/// zeroes ~2 MB on first touch, which inside the zkVM guest crossed a
+/// proving-shard boundary and made receipts unprovable (measured).
 ///
 /// `syscall_log` collects bytes written via the QEMU-compatible write
 /// syscall in syscall mode. It is deliberately NOT part of the hashed
@@ -35,8 +44,9 @@ const UNALLOCATED: u32 = u32::MAX;
 /// equality across independent implementations is checked by the
 /// conformance differential instead.
 pub struct Mem {
-    pages: Vec<Page>,
-    page_index: Vec<u32>,
+    page_slots: Vec<Page>,
+    page_dir: BTreeMap<u32, usize>,
+    lookaside: Vec<(u32, u32)>, // (page tag, slot); NO_PAGE = empty
     pub syscall_log: Vec<u8>,
 }
 
@@ -48,36 +58,60 @@ impl Default for Mem {
 
 impl Mem {
     pub fn new() -> Self {
-        Mem { pages: Vec::new(), page_index: Vec::new(), syscall_log: Vec::new() }
+        Mem {
+            page_slots: Vec::new(),
+            page_dir: BTreeMap::new(),
+            lookaside: vec![(NO_PAGE, NO_SLOT); LOOKASIDE_SLOTS],
+            syscall_log: Vec::new(),
+        }
     }
 
-    fn slot_of(&self, page: u32) -> Option<usize> {
-        let slot = *self.page_index.get(page as usize)?;
-        if slot == UNALLOCATED {
-            None
-        } else {
-            Some(slot as usize)
+    /// O(1) on a lookaside hit; O(log n) directory walk on a miss
+    /// (which then fills the lookaside — callers hold `&mut`).
+    fn slot_of(&mut self, page: u32) -> Option<usize> {
+        let idx = (page as usize) % LOOKASIDE_SLOTS;
+        let (tag, slot) = self.lookaside[idx];
+        if tag == page {
+            return if slot == NO_SLOT { None } else { Some(slot as usize) };
         }
+        let slot = *self.page_dir.get(&page)?;
+        self.lookaside[idx] = (page, slot as u32);
+        Some(slot)
+    }
+
+    /// Read-only probe: same as `slot_of` but without filling the
+    /// lookaside (for `&self` paths, which are rare).
+    fn slot_of_ro(&self, page: u32) -> Option<usize> {
+        let idx = (page as usize) % LOOKASIDE_SLOTS;
+        let (tag, slot) = self.lookaside[idx];
+        if tag == page {
+            return if slot == NO_SLOT { None } else { Some(slot as usize) };
+        }
+        self.page_dir.get(&page).copied()
     }
 
     fn slot_mut_or_alloc(&mut self, page: u32) -> usize {
-        if page as usize >= self.page_index.len() {
-            self.page_index.resize(page as usize + 1, UNALLOCATED);
+        let idx = (page as usize) % LOOKASIDE_SLOTS;
+        let (tag, slot) = self.lookaside[idx];
+        if tag == page && slot != NO_SLOT {
+            return slot as usize;
         }
-        let slot = self.page_index[page as usize];
-        if slot == UNALLOCATED {
-            let s = self.pages.len();
-            self.pages.push(Box::new([0; PAGE_SIZE]));
-            self.page_index[page as usize] = s as u32;
-            s
-        } else {
-            slot as usize
-        }
+        let slot = match self.page_dir.get(&page) {
+            Some(&s) => s,
+            None => {
+                let s = self.page_slots.len();
+                self.page_slots.push(Box::new([0; PAGE_SIZE]));
+                self.page_dir.insert(page, s);
+                s
+            }
+        };
+        self.lookaside[idx] = (page, slot as u32);
+        slot
     }
 
     /// Little-endian read of `len` (1, 2, 4 or 8) bytes. Unallocated
     /// pages read as zeros.
-    pub fn read(&self, addr: u64, len: usize) -> Result<u64, MemError> {
+    pub fn read(&mut self, addr: u64, len: usize) -> Result<u64, MemError> {
         if len != 1 && len != 2 && len != 4 && len != 8 {
             return Err(MemError::OutOfRange);
         }
@@ -99,7 +133,7 @@ impl Mem {
         for i in 0..len {
             let a = addr + i as u64;
             let b = match self.slot_of((a / PAGE_SIZE as u64) as u32) {
-                Some(s) => self.pages[s][(a % PAGE_SIZE as u64) as usize],
+                Some(s) => self.page_slots[s][(a % PAGE_SIZE as u64) as usize],
                 None => 0,
             };
             val |= (b as u64) << (8 * i);
@@ -119,7 +153,7 @@ impl Mem {
         for (i, &b) in bytes.iter().enumerate() {
             let a = addr + i as u64;
             let slot = self.slot_mut_or_alloc((a / PAGE_SIZE as u64) as u32);
-            self.pages[slot][(a % PAGE_SIZE as u64) as usize] = b;
+            self.page_slots[slot][(a % PAGE_SIZE as u64) as usize] = b;
         }
         Ok(())
     }
@@ -142,8 +176,8 @@ impl Mem {
         let mut out = Vec::with_capacity(len);
         for i in 0..len {
             let a = addr + i as u64;
-            out.push(match self.slot_of((a / PAGE_SIZE as u64) as u32) {
-                Some(s) => self.pages[s][(a % PAGE_SIZE as u64) as usize],
+            out.push(match self.slot_of_ro((a / PAGE_SIZE as u64) as u32) {
+                Some(s) => self.page_slots[s][(a % PAGE_SIZE as u64) as usize],
                 None => 0,
             });
         }
@@ -152,46 +186,38 @@ impl Mem {
 
     /// Root of the memory state: BLAKE3 over each allocated page
     /// (index in LE, then the full 4 KiB), pages in sorted index
-    /// order. `page_index` is inherently sorted by page number, so the
-    /// iteration order matches the BTreeMap-based implementation this
-    /// replaced byte-for-byte.
+    /// order — `page_dir` iterates sorted, matching every earlier
+    /// implementation byte-for-byte.
     pub fn merkle_root(&self) -> [u8; 32] {
         let mut h = blake3::Hasher::new();
-        for (page, &slot) in self.page_index.iter().enumerate() {
-            if slot != UNALLOCATED {
-                h.update(&(page as u32).to_le_bytes());
-                h.update(self.pages[slot as usize].as_slice());
-            }
+        for (&idx, page) in &self.page_dir {
+            h.update(&idx.to_le_bytes());
+            h.update(self.page_slots[*page].as_slice());
         }
         h.finalize().into()
     }
 
     pub fn allocated_pages(&self) -> usize {
-        self.pages.len()
+        self.page_dir.len()
     }
 
     /// Iterate allocated pages in canonical (sorted) order — used by
     /// the snapshot serializer.
     pub(crate) fn page_iter(&self) -> impl Iterator<Item = (u32, &Page)> {
-        self.page_index
-            .iter()
-            .enumerate()
-            .filter(|(_, &slot)| slot != UNALLOCATED)
-            .map(|(page, &slot)| (page as u32, &self.pages[slot as usize]))
+        self.page_dir.iter().map(|(&i, &s)| (i, &self.page_slots[s]))
     }
 
     pub(crate) fn insert_page(&mut self, idx: u32, page: Page) {
-        if idx as usize >= self.page_index.len() {
-            self.page_index.resize(idx as usize + 1, UNALLOCATED);
-        }
-        let slot = self.page_index[idx as usize];
-        match slot {
-            UNALLOCATED => {
-                let s = self.pages.len();
-                self.pages.push(page);
-                self.page_index[idx as usize] = s as u32;
+        match self.page_dir.get(&idx) {
+            Some(&s) => self.page_slots[s] = page,
+            None => {
+                let s = self.page_slots.len();
+                self.page_slots.push(page);
+                self.page_dir.insert(idx, s);
             }
-            s => self.pages[s as usize] = page,
         }
+        // The lookaside may hold a stale (page, NO_SLOT) probe for a
+        // page that was unallocated until now.
+        self.lookaside[(idx as usize) % LOOKASIDE_SLOTS] = (NO_PAGE, NO_SLOT);
     }
 }
