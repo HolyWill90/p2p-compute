@@ -30,9 +30,12 @@ pub struct ReceiptOutcome {
 /// run would otherwise freeze coordinator progress).
 pub const MAX_RECEIPT_BYTES: usize = 64 * 1024 * 1024;
 /// Hard wall-clock limit for one verifier invocation. The honest nano
-/// verification takes ~1 s; anything far beyond that is killed and
-/// rejected so the main loop cannot be wedged by a hostile claim.
-const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+/// verification takes ~1 s locally and up to ~60 s on slow CI
+/// hardware (the verifier re-derives the verifying key from the guest
+/// ELF on every invocation); anything far beyond that is killed and
+/// rejected so the main loop cannot be wedged indefinitely by a
+/// hostile claim.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(180);
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 

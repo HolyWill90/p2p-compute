@@ -115,8 +115,9 @@ jobs:
       # Pinned nightly date: floating nightly changes sanitizer
       # codegen independently of the repository.
       - name: Install pinned nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly-2026-08-15
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-08-15
           components: rust-src
       - name: Install cargo-fuzz (pinned version)
         run: cargo install cargo-fuzz --locked --version 0.13.2
